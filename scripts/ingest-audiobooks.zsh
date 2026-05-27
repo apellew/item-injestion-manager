@@ -10,6 +10,9 @@
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before
 # the first run.
 #
+# Required .env keys: INGEST_ROOT, ABS_LIBRARY_DIR. All paths are absolute;
+# no fallbacks or derived defaults.
+#
 # Pipeline per book:
 #   1. validate     (audio type, author dir naming, required files, mp3 count)
 #   2. classify     (per-mp3 vs LIVE: new / winner / loser via ffprobe)
@@ -50,13 +53,9 @@
 #   <INGEST_ROOT>/ingest-audiobook/<Author>/<Book>/{*.mp3, cover.jpg, metadata.json}
 #
 # Output:
-#   <LIVE_DIR>/<Author>/<Book>/...                            (live library)
-#   <LIVE_DIR> zzz/<Author>/<Book>/...                        (staging — sibling of LIVE_DIR)
+#   <ABS_LIBRARY_DIR>/<Author>/<Book>/...        (live library)
+#   <ABS_LIBRARY_DIR> zzz/<Author>/<Book>/...    (staging — sibling of LIVE_DIR)
 #   <INGEST_ROOT>/ingest-audiobook_rejected/<category>/<Author>/<Book>/*
-#
-# LIVE_DIR is taken from ABS_LIBRARY_DIR if set in .env, otherwise it
-# defaults to <LIBRARY_ROOT>/ABS Audiobooks for backwards compatibility.
-# See scripts/.env.template for full documentation.
 #
 # Usage:
 #   ingest-audiobooks.zsh [DEBUG]
@@ -88,7 +87,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     print -u2 "Create $CONFIG_FILE with at least the following content:"
     print -u2 ""
     print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
-    print -u2 "    export LIBRARY_ROOT=\"/path/to/your/library\""
+    print -u2 "    export ABS_LIBRARY_DIR=\"/path/to/your/audiobookshelf/Audiobooks\""
   fi
   print -u2 ""
   exit 78  # EX_CONFIG
@@ -97,7 +96,7 @@ fi
 source "$CONFIG_FILE"
 
 typeset -a _missing
-for _var in INGEST_ROOT LIBRARY_ROOT; do
+for _var in INGEST_ROOT ABS_LIBRARY_DIR; do
   if [[ -z "${(P)_var:-}" ]]; then
     _missing+=( "$_var" )
   fi
@@ -112,9 +111,7 @@ fi
 unset _missing _var _v
 
 INGEST_ROOT="${INGEST_ROOT:A}"
-LIBRARY_ROOT="${LIBRARY_ROOT:A}"
-# ABS_LIBRARY_DIR is optional; normalise only if set.
-[[ -n "${ABS_LIBRARY_DIR:-}" ]] && ABS_LIBRARY_DIR="${ABS_LIBRARY_DIR:A}"
+ABS_LIBRARY_DIR="${ABS_LIBRARY_DIR:A}"
 
 # --- argument parsing -------------------------------------------------------
 DEBUG=0
@@ -132,9 +129,8 @@ fi
 
 INGEST_DIR="${INGEST_ROOT}/ingest-audiobook"
 REJECTED_DIR="${INGEST_ROOT}/ingest-audiobook_rejected"
-# Audiobook library: ABS_LIBRARY_DIR if set, else the legacy location
-# under <LIBRARY_ROOT> for backwards compatibility with existing setups.
-LIVE_DIR="${ABS_LIBRARY_DIR:-${LIBRARY_ROOT}/ABS Audiobooks}"
+# Audiobook library is whatever ABS_LIBRARY_DIR points at (required).
+LIVE_DIR="$ABS_LIBRARY_DIR"
 # Staging dir is always a sibling of LIVE_DIR with a " zzz" suffix —
 # same filesystem is required so the final mv into LIVE_DIR is atomic.
 COPY_DIR="${LIVE_DIR%/} zzz"
@@ -159,23 +155,17 @@ for dep in ffprobe; do
   fi
 done
 
-for d in "$INGEST_DIR" "$LIBRARY_ROOT"; do
-  if [[ ! -d "$d" ]]; then
-    print -u2 "FATAL: directory does not exist: $d"
-    exit 66
-  fi
-done
+if [[ ! -d "$INGEST_DIR" ]]; then
+  print -u2 "FATAL: directory does not exist: $INGEST_DIR"
+  exit 66
+fi
 
 # Parent of LIVE_DIR must exist — we'll mkdir LIVE_DIR itself, but won't
 # silently create an arbitrary nested tree at a path the user might have
-# typo'd in ABS_LIBRARY_DIR. (For the legacy fallback, this is LIBRARY_ROOT,
-# which we've already validated above; the extra check is a no-op there.)
+# typo'd in ABS_LIBRARY_DIR.
 if [[ ! -d "${LIVE_DIR:h}" ]]; then
-  print -u2 "FATAL: parent directory of audiobook library does not exist: ${LIVE_DIR:h}"
-  print -u2 "       (LIVE_DIR=$LIVE_DIR)"
-  if [[ -n "${ABS_LIBRARY_DIR:-}" ]]; then
-    print -u2 "       Check ABS_LIBRARY_DIR in $CONFIG_FILE."
-  fi
+  print -u2 "FATAL: parent directory of ABS_LIBRARY_DIR does not exist: ${LIVE_DIR:h}"
+  print -u2 "       (ABS_LIBRARY_DIR=$ABS_LIBRARY_DIR)"
   exit 66
 fi
 
