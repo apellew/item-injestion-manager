@@ -10,8 +10,19 @@
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before
 # the first run. Shared helpers are sourced from `scripts/_lib.zsh`.
 #
-# Required .env keys: INGEST_ROOT, ABS_LIBRARY_DIR. All paths are absolute;
-# no fallbacks or derived defaults.
+# Required .env keys:
+#   INGEST_ROOT, ABS_LIBRARY_DIR,
+#   ABS_PARSE_REGEX, ABS_NAME_TEMPLATE.
+# All paths are absolute; no fallbacks or derived defaults.
+#
+# Destination flow per book directory:
+#   1. Source book dir: <INGEST_ROOT>/ingest-audiobooks/<rel> where <rel>
+#      is the relative path (typically "Author/Book").
+#   2. <rel> is matched against ABS_PARSE_REGEX. No match -> parse_error.
+#   3. ABS_NAME_TEMPLATE is expanded (%NAME% replaced with captures).
+#   4. Live destination: <ABS_LIBRARY_DIR>/<expanded>/
+#      Staging:          <ABS_LIBRARY_DIR> zzz/<expanded>/
+#   5. Individual mp3 filenames within the book are preserved verbatim.
 #
 # Pipeline per book:
 #   1. validate     (audio type, author dir naming, required files, mp3 count)
@@ -73,6 +84,7 @@ SCRIPT_DIR="${0:A:h}"
 CONFIG_FILE="${SCRIPT_DIR}/.env"
 TEMPLATE_FILE="${SCRIPT_DIR}/.env.template"
 LIB_FILE="${SCRIPT_DIR}/_lib.zsh"
+PARSE_HELPER="${SCRIPT_DIR}/_parse_name.py"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   print -u2 ""
@@ -89,6 +101,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     print -u2 ""
     print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
     print -u2 "    export ABS_LIBRARY_DIR=\"/path/to/your/audiobookshelf/Audiobooks\""
+    print -u2 "    export ABS_PARSE_REGEX='...'"
+    print -u2 "    export ABS_NAME_TEMPLATE='...'"
   fi
   print -u2 ""
   exit 78  # EX_CONFIG
@@ -97,7 +111,7 @@ fi
 source "$CONFIG_FILE"
 
 typeset -a _missing
-for _var in INGEST_ROOT ABS_LIBRARY_DIR; do
+for _var in INGEST_ROOT ABS_LIBRARY_DIR ABS_PARSE_REGEX ABS_NAME_TEMPLATE; do
   if [[ -z "${(P)_var:-}" ]]; then
     _missing+=( "$_var" )
   fi
@@ -120,6 +134,11 @@ if [[ ! -f "$LIB_FILE" ]]; then
   exit 70  # EX_SOFTWARE
 fi
 source "$LIB_FILE"
+
+if [[ ! -f "$PARSE_HELPER" ]]; then
+  print -u2 "FATAL: regex helper not found: $PARSE_HELPER"
+  exit 70
+fi
 
 # --- argument parsing -------------------------------------------------------
 DEBUG=0
@@ -154,7 +173,7 @@ MIN_FILE_AGE_SECONDS=30         # don't touch anything fresher than this
 EMPTY_DIR_MIN_AGE_MIN=60        # 1 hour: cleanup of empty dirs
 
 # --- preflight --------------------------------------------------------------
-for dep in ffprobe; do
+for dep in ffprobe python3; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     print -u2 "FATAL: required dependency '$dep' not found in PATH"
     print -u2 "PATH=$PATH"
@@ -621,9 +640,22 @@ for book_dir in "${books[@]}"; do
     for ef in "${extras[@]}"; do log "    - ${ef#${book_dir}/}"; done
   fi
 
+  # --- classify destination: regex + template ----------------------------
+  # The source's Author/Book relative path goes through the regex; the
+  # template expands to the destination relative path. Default behaviour
+  # (no-op, preserving Author/Book structure) requires:
+  #   ABS_PARSE_REGEX='(?P<AUTHOR>[^/]+)/(?P<BOOK>.+)'
+  #   ABS_NAME_TEMPLATE='%AUTHOR%/%BOOK%'
+  local dest_rel
+  if ! dest_rel="$(python3 "$PARSE_HELPER" "$ABS_PARSE_REGEX" "$ABS_NAME_TEMPLATE" "$rel" 2>/dev/null)"; then
+    reject_book "$book_dir" "parse_error" "ABS_PARSE_REGEX did not match: '$rel'"
+    continue
+  fi
+  log "  dest: '$rel' -> '$dest_rel'"
+
   # --- per-mp3 classification: new / winner / loser ----------------------
-  local live_book="${LIVE_DIR}/${rel}"
-  local copy_book="${COPY_DIR}/${rel}"
+  local live_book="${LIVE_DIR}/${dest_rel}"
+  local copy_book="${COPY_DIR}/${dest_rel}"
 
   typeset -A mp3_decision        # fname -> "new"|"winner"|"loser"
   typeset -A mp3_compare_block   # fname -> formatted compare info (winners+losers only)
