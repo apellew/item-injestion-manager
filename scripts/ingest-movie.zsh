@@ -128,8 +128,11 @@ for dep in ffprobe python3; do
 done
 
 if [[ ! -d "$INGEST_DIR" ]]; then
-  print -u2 "FATAL: directory does not exist: $INGEST_DIR"
-  exit 66
+  if (( DEBUG )); then
+    print -- "[DEBUG] would mkdir -p: $INGEST_DIR"
+  else
+    mkdir -p -- "$INGEST_DIR"
+  fi
 fi
 
 if [[ ! -d "${MOVIES_DIR:h}" ]]; then
@@ -138,7 +141,7 @@ if [[ ! -d "${MOVIES_DIR:h}" ]]; then
   exit 66
 fi
 
-for d in "$REJECTED_DIR" "$MOVIES_DIR"; do
+for d in "$MOVIES_DIR"; do
   if [[ ! -d "$d" ]]; then
     if (( DEBUG )); then
       print -- "[DEBUG] would mkdir -p: $d"

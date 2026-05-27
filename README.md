@@ -157,6 +157,8 @@ $INGEST_ROOT/
 └── ingest-audiobooks_rejected/
 ```
 
+The per-script ingest subdirs (and their `_rejected` siblings) are auto-created on demand — you only need `INGEST_ROOT` to exist. The `_rejected/` directories specifically are only created the first time a rejection actually happens, so systems that never reject anything stay tidy.
+
 Library destinations are each configured independently — they can live on the same volume as each other or different ones. A typical "everything on one NAS" layout might look like:
 
 ```
