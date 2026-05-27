@@ -2,7 +2,7 @@
 
 A small, extensible zsh-based media ingestion pipeline. Files dropped into local "ingest" directories are validated, normalised, and moved into a media library elsewhere (often a NAS).
 
-A parent orchestrator script runs continuously and discovers per-media-type child scripts on a fixed loop. Currently shipped children target [Jellyfin](https://jellyfin.org/) (TV `.m4v`, Movie `.m4v`) and [AudioBookShelf](https://www.audiobookshelf.org/) (audiobooks `.mp3`), but the orchestrator is media-agnostic — see [Adding a new child](#adding-a-new-child).
+A parent orchestrator script runs continuously and discovers per-media-type child scripts on a fixed loop. Currently shipped children handle TV episodes (`.m4v`), movies (`.m4v`), and audiobooks (`.mp3`). The orchestrator is media-agnostic — see [Adding a new child](#adding-a-new-child).
 
 Source-filename parsing and destination-naming are user-configurable per child via Python-style regexes and `%NAME%` templates in `.env` — see [Filename parsing](#filename-parsing-regex--template) below.
 
@@ -11,10 +11,10 @@ Source-filename parsing and destination-naming are user-configurable per child v
 | Script | Role |
 |---|---|
 | [`scripts/ingest.zsh`](scripts/ingest.zsh) | Parent orchestrator. Runs each `ingest-*.zsh` child every 120 s. If `LIBRARY_ROOT` is set in .env, waits when the directory is unreachable (e.g. NAS off-network); otherwise skips that probe. |
-| [`scripts/ingest-tv.zsh`](scripts/ingest-tv.zsh) | TV episode child. Validates `.m4v` files (HEVC/H.265, minimum duration), parses filenames via `JELLYFIN_TV_PARSE_REGEX` + `JELLYFIN_TV_NAME_TEMPLATE`, and writes to `JELLYFIN_TV_DIR`. |
-| [`scripts/ingest-movie.zsh`](scripts/ingest-movie.zsh) | Movie child. Validates `.m4v` files, parses filenames via `JELLYFIN_MOVIE_PARSE_REGEX` + `JELLYFIN_MOVIE_NAME_TEMPLATE`, and writes to `JELLYFIN_MOVIES_DIR`. |
-| [`scripts/ingest-audiobooks.zsh`](scripts/ingest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Destination derived via `ABS_PARSE_REGEX` + `ABS_NAME_TEMPLATE` applied to the book directory's Author/Book path. Writes to `ABS_LIBRARY_DIR`. |
-| [`scripts/_lib.zsh`](scripts/_lib.zsh) | Shared helper library sourced by every child. Provides file-stat helpers, `ffprobe` wrappers, mid-copy detection, and the video-quality `compare_files` used by both TV and Movie. Not invoked directly — leading underscore keeps the orchestrator's `ingest-*.zsh` glob from picking it up. |
+| [`scripts/ingest-tv.zsh`](scripts/ingest-tv.zsh) | TV episode child. Validates `.m4v` files (HEVC/H.265, minimum duration), parses filenames via `TV_PARSE_REGEX` + `TV_NAME_TEMPLATE`, and installs into `TV_DIR` via a staged copy-then-rename (see [Why staging?](#why-staging)). |
+| [`scripts/ingest-movie.zsh`](scripts/ingest-movie.zsh) | Movie child. Validates `.m4v` files, parses filenames via `MOVIE_PARSE_REGEX` + `MOVIE_NAME_TEMPLATE`, and installs into `MOVIES_DIR` via the same staged pattern. |
+| [`scripts/ingest-audiobooks.zsh`](scripts/ingest-audiobooks.zsh) | Audiobook child. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Destination derived via `AUDIOBOOKS_PARSE_REGEX` + `AUDIOBOOKS_NAME_TEMPLATE` applied to the book directory's Author/Book path. Installs into `AUDIOBOOKS_DIR` via the same staged pattern. |
+| [`scripts/_lib.zsh`](scripts/_lib.zsh) | Shared helper library sourced by every child. Provides file-stat helpers, `ffprobe` wrappers, mid-copy detection, video-quality `compare_files`, and the `stage_file` / `merge_file` staging primitives. Not invoked directly — leading underscore keeps the orchestrator's `ingest-*.zsh` glob from picking it up. |
 | [`scripts/_parse_name.py`](scripts/_parse_name.py) | Python3 helper that does the regex match + template expansion. Each child shells out to it once per source unit (per file for TV/Movie, per book directory for audiobooks). Not invoked directly by the user. |
 | [`scripts/.env.template`](scripts/.env.template) | Annotated configuration template. Copy to `scripts/.env` and edit. |
 
@@ -74,17 +74,19 @@ All values are full absolute paths. No fallbacks, no derived defaults.
 | Key | Required by | Purpose |
 |---|---|---|
 | `INGEST_ROOT` | every script | Root of the local "ingest" directory tree. Each child watches a subdirectory under this. |
-| `JELLYFIN_MOVIES_DIR` | `ingest-movie.zsh` | Where movies land. |
-| `JELLYFIN_TV_DIR` | `ingest-tv.zsh` | Where TV episodes land. |
-| `ABS_LIBRARY_DIR` | `ingest-audiobooks.zsh` | The AudioBookShelf live library directory itself (NOT a parent). The staging directory is derived as a sibling with a ` zzz` suffix. |
+| `MOVIES_DIR` | `ingest-movie.zsh` | Where movies land. |
+| `TV_DIR` | `ingest-tv.zsh` | Where TV episodes land. |
+| `AUDIOBOOKS_DIR` | `ingest-audiobooks.zsh` | The live audiobooks library directory itself (NOT a parent). |
+
+Each script derives its own staging directory as a sibling of the live destination with a ` zzz` suffix (e.g. `MOVIES_DIR="/Volumes/nas/Movies"` implies a staging dir at `/Volumes/nas/Movies zzz`). The staging directory must be on the same filesystem as the live destination — see [Why staging?](#why-staging) for why.
 
 **Filename parsing (one pair per child):**
 
 | Key pair | Required by |
 |---|---|
-| `JELLYFIN_TV_PARSE_REGEX` + `JELLYFIN_TV_NAME_TEMPLATE` | `ingest-tv.zsh` |
-| `JELLYFIN_MOVIE_PARSE_REGEX` + `JELLYFIN_MOVIE_NAME_TEMPLATE` | `ingest-movie.zsh` |
-| `ABS_PARSE_REGEX` + `ABS_NAME_TEMPLATE` | `ingest-audiobooks.zsh` |
+| `TV_PARSE_REGEX` + `TV_NAME_TEMPLATE` | `ingest-tv.zsh` |
+| `MOVIE_PARSE_REGEX` + `MOVIE_NAME_TEMPLATE` | `ingest-movie.zsh` |
+| `AUDIOBOOKS_PARSE_REGEX` + `AUDIOBOOKS_NAME_TEMPLATE` | `ingest-audiobooks.zsh` |
 
 See [Filename parsing](#filename-parsing-regex--template) below for the mechanism.
 
@@ -94,9 +96,9 @@ See [Filename parsing](#filename-parsing-regex--template) below for the mechanis
 
 ```zsh
 export LIBRARY_ROOT="/Volumes/nas/media"
-export JELLYFIN_MOVIES_DIR="${LIBRARY_ROOT}/Movies"
-export JELLYFIN_TV_DIR="${LIBRARY_ROOT}/TV"
-export ABS_LIBRARY_DIR="${LIBRARY_ROOT}/ABS Audiobooks"
+export MOVIES_DIR="${LIBRARY_ROOT}/Movies"
+export TV_DIR="${LIBRARY_ROOT}/TV"
+export AUDIOBOOKS_DIR="${LIBRARY_ROOT}/Audiobooks"
 ```
 
 Users with libraries on different volumes can leave `LIBRARY_ROOT` unset and write absolute paths directly. There's one side effect of setting it: the orchestrator uses it as an "is the NAS reachable?" probe and waits when the directory is unavailable. If `LIBRARY_ROOT` is unset, the probe is skipped and individual children fail if their library is unreachable.
@@ -107,20 +109,20 @@ Each child script parses source filenames via two `.env` keys: a **Python-style 
 
 ### Default values
 
-The template ships with working defaults that reproduce conventional Jellyfin / ABS naming:
+The template ships with working defaults that reproduce conventional naming:
 
 ```zsh
 # TV: matches "Show (YYYY) SxxEyy"
-JELLYFIN_TV_PARSE_REGEX='(?P<SHOW>.+?) \((?P<YEAR>\d{4})\) S(?P<SEASON>\d{2})E(?P<EPISODE>\d{2})'
-JELLYFIN_TV_NAME_TEMPLATE='%SHOW% (%YEAR%)/Season %SEASON%/%SHOW% (%YEAR%) - S%SEASON%E%EPISODE%'
+TV_PARSE_REGEX='(?P<SHOW>.+?) \((?P<YEAR>\d{4})\) S(?P<SEASON>\d{2})E(?P<EPISODE>\d{2})'
+TV_NAME_TEMPLATE='%SHOW% (%YEAR%)/Season %SEASON%/%SHOW% (%YEAR%) - S%SEASON%E%EPISODE%'
 
 # Movie: matches "Title (YYYY)" — year required
-JELLYFIN_MOVIE_PARSE_REGEX='(?P<TITLE>.+?) \((?P<YEAR>\d{4})\)'
-JELLYFIN_MOVIE_NAME_TEMPLATE='%TITLE% (%YEAR%)/%TITLE% (%YEAR%)'
+MOVIE_PARSE_REGEX='(?P<TITLE>.+?) \((?P<YEAR>\d{4})\)'
+MOVIE_NAME_TEMPLATE='%TITLE% (%YEAR%)/%TITLE% (%YEAR%)'
 
 # Audiobook: matches "Author/Book" (the book directory path)
-ABS_PARSE_REGEX='(?P<AUTHOR>[^/]+)/(?P<BOOK>.+)'
-ABS_NAME_TEMPLATE='%AUTHOR%/%BOOK%'
+AUDIOBOOKS_PARSE_REGEX='(?P<AUTHOR>[^/]+)/(?P<BOOK>.+)'
+AUDIOBOOKS_NAME_TEMPLATE='%AUTHOR%/%BOOK%'
 ```
 
 ### How the parser works
@@ -131,9 +133,9 @@ For TV and Movie children, given a source file at `${INGEST_ROOT}/ingest-tv/Doct
 2. It runs `python3 scripts/_parse_name.py "$REGEX" "$TEMPLATE" "$source_rel"`.
 3. The helper does `re.fullmatch(regex, source_rel)`. If it doesn't match, the helper exits with code 2 and the calling script issues a `parse_error` rejection.
 4. If it matches, the helper replaces each `%NAME%` in the template with the corresponding capture group's value: `Doctor Who (2023)/Season 01/Doctor Who (2023) - S01E01`.
-5. The script appends `.m4v` and prepends `${JELLYFIN_TV_DIR}/` to produce the final destination.
+5. The script appends `.m4v` and prepends `${TV_DIR}/` to produce the final destination, then installs via [staging](#why-staging).
 
-For the audiobook child, the regex matches against the book directory's relative path (e.g. `Stephen King/The Stand`), the template produces a destination relative path (e.g. `Stephen King/The Stand`), and individual mp3 filenames within the book are preserved verbatim under that destination.
+For the audiobook child, the regex matches against the book directory's relative path (e.g. `Stephen King/The Stand`), the template produces a destination relative path, and individual mp3 filenames within the book are preserved verbatim under that destination.
 
 ### Failed parses
 
@@ -142,6 +144,23 @@ If the regex doesn't match a given source filename, the file (or book) is reject
 ### Overriding the defaults
 
 Just set the relevant `*_PARSE_REGEX` and `*_NAME_TEMPLATE` in your `.env` to whatever you need. The regex syntax is Python's full named-group flavour (`(?P<NAME>...)`); the template syntax is plain `%NAME%` placeholders with literal slashes as path separators. The file extension is hardcoded per script (`.m4v` for TV/Movie, mp3 names preserved for audiobooks) and not part of the template.
+
+## Why staging?
+
+Every install — TV, Movie, audiobook — goes through a sibling staging directory before landing in the live library:
+
+1. **Stage:** `cp` source → `<DEST_DIR> zzz/<expanded path>` on the same filesystem as the live destination.
+2. **Merge:** atomic `mv` of the staged file (or staged book directory tree) → live destination.
+3. **Cleanup:** remove the source file.
+
+Two reasons this matters:
+
+- Some media servers scan the live library aggressively and auto-import anything they see there. Copying directly into the live library risks the server picking up a half-copied file. The staged file only appears in the live library as a complete unit, because the final `mv` is an atomic same-filesystem rename.
+- Cross-filesystem copies (which include the typical local-disk → NAS-mount case) are slow and interruptible — `mv src dst` across filesystems silently becomes `cp` + `rm`, with all the partial-state risk that implies. Splitting it into an explicit `cp` to staging followed by an atomic same-filesystem `mv` makes the failure modes legible.
+
+The staging directory is always a **sibling** of the live destination with a ` zzz` suffix (so it sorts to the bottom in file managers and visibly signals "not part of the live library"). It's not separately configurable — the same-filesystem requirement is what makes the final `mv` atomic, and a sibling is the simplest place that guarantees that.
+
+If a `cp` to staging fails partway through, the staged path is left in place and the source is untouched; the next run re-uses the partial-staged file if its size matches the source, or recopies if not. The live library is never touched by a failed install.
 
 ## Directory layout
 
@@ -162,22 +181,24 @@ The per-script ingest subdirs (and their `_rejected` siblings) are auto-created 
 Library destinations are each configured independently — they can live on the same volume as each other or different ones. A typical "everything on one NAS" layout might look like:
 
 ```
-$JELLYFIN_MOVIES_DIR        → /Volumes/nas/media/Movies
-$JELLYFIN_TV_DIR            → /Volumes/nas/media/TV
-$ABS_LIBRARY_DIR            → /Volumes/nas/media/ABS Audiobooks
-                              (staging at /Volumes/nas/media/ABS Audiobooks zzz)
+$MOVIES_DIR         → /Volumes/nas/media/Movies
+                      (staging at /Volumes/nas/media/Movies zzz)
+$TV_DIR             → /Volumes/nas/media/TV
+                      (staging at /Volumes/nas/media/TV zzz)
+$AUDIOBOOKS_DIR     → /Volumes/nas/media/Audiobooks
+                      (staging at /Volumes/nas/media/Audiobooks zzz)
 ```
 
 …while a split-volume layout might look like:
 
 ```
-$JELLYFIN_MOVIES_DIR        → /Volumes/jellyfin/Movies
-$JELLYFIN_TV_DIR            → /Volumes/jellyfin/TV
-$ABS_LIBRARY_DIR            → /Volumes/audiobookshelf/Audiobooks
-                              (staging at /Volumes/audiobookshelf/Audiobooks zzz)
+$MOVIES_DIR         → /Volumes/media/Movies
+$TV_DIR             → /Volumes/media/TV
+$AUDIOBOOKS_DIR     → /Volumes/media-other/Audiobooks
+                      (staging at /Volumes/media-other/Audiobooks zzz)
 ```
 
-The `zzz` suffix on the audiobook staging dir is deliberate: it sorts to the bottom in file managers and signals to humans "not part of the live library".
+Each staging dir is always a sibling of its live counterpart, on the same filesystem — see [Why staging?](#why-staging).
 
 ## Orchestrator behaviour
 
@@ -197,8 +218,9 @@ Drop an `ingest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orch
 - By convention, the child's input directory under `$INGEST_ROOT` shares its name (so `ingest-foo.zsh` watches `ingest-foo/`, rejects into `ingest-foo_rejected/`).
 - Accept `[DEBUG]` as the only positional argument.
 - Source `scripts/.env` at startup (so standalone testing works) and validate that its own required keys are set.
-- Source `scripts/_lib.zsh` for the shared helpers (`file_size`, `file_age_seconds`, `is_file_in_use`, `ffprobe_value`, `ffprobe_duration`, `compare_files`).
-- Use `scripts/_parse_name.py` for filename parsing — define `<TYPE>_PARSE_REGEX` and `<TYPE>_NAME_TEMPLATE` as required `.env` keys and shell out to the helper.
+- Source `scripts/_lib.zsh` for the shared helpers (`file_size`, `file_age_seconds`, `is_file_in_use`, `ffprobe_value`, `ffprobe_duration`, `compare_files`, `stage_file`, `merge_file`).
+- Use `scripts/_parse_name.py` for filename parsing — don't write a hand-rolled parser in each new child.
+- Use the `stage_file` / `merge_file` pair from `_lib.zsh` to install files; don't go direct to the live library.
 - Be a single-run script (run once, exit).
 - Return 0 on success; non-zero is logged as a warning.
 
@@ -213,9 +235,9 @@ Expects `.m4v` files in `$INGEST_ROOT/ingest-tv/` (recursive).
 | Duration < 120 s | `corrupt` rejection (likely stub) |
 | Zero-byte for > 24 h | `corrupt` rejection |
 | `ffprobe` can't read for > 24 h | `corrupt` rejection |
-| `JELLYFIN_TV_PARSE_REGEX` doesn't match the filename (extension stripped) | `parse_error` rejection |
+| `TV_PARSE_REGEX` doesn't match the filename (extension stripped) | `parse_error` rejection |
 
-Destination is constructed by expanding `JELLYFIN_TV_NAME_TEMPLATE` with the regex's capture values, then joined with `$JELLYFIN_TV_DIR` and `.m4v` to produce the final path. See [Filename parsing](#filename-parsing-regex--template) for the mechanism and shipped defaults.
+Destination is constructed by expanding `TV_NAME_TEMPLATE` with the regex's capture values, then joined with `$TV_DIR` and `.m4v` to produce the final path. The install is staged — see [Why staging?](#why-staging).
 
 Conflict resolution: higher video height wins; file size is the tiebreak.
 
@@ -230,9 +252,9 @@ Expects `.m4v` files in `$INGEST_ROOT/ingest-movie/` (recursive).
 | Duration < 120 s | `corrupt` rejection (likely stub) |
 | Zero-byte for > 24 h | `corrupt` rejection |
 | `ffprobe` can't read for > 24 h | `corrupt` rejection |
-| `JELLYFIN_MOVIE_PARSE_REGEX` doesn't match the filename (extension stripped) | `parse_error` rejection |
+| `MOVIE_PARSE_REGEX` doesn't match the filename (extension stripped) | `parse_error` rejection |
 
-Destination is constructed by expanding `JELLYFIN_MOVIE_NAME_TEMPLATE` with the regex's capture values, then joined with `$JELLYFIN_MOVIES_DIR` and `.m4v` to produce the final path. The shipped default regex requires a year in the filename; if your conventions differ, override the regex/template in `.env`.
+Destination is constructed by expanding `MOVIE_NAME_TEMPLATE` with the regex's capture values, then joined with `$MOVIES_DIR` and `.m4v` to produce the final path. The install is staged — see [Why staging?](#why-staging). The shipped default regex requires a year in the filename; if your conventions differ, override the regex/template in `.env`.
 
 Conflict resolution: higher video height wins; file size is the tiebreak.
 
@@ -246,11 +268,11 @@ Expects strictly `Author/Book/` (depth 2) under `$INGEST_ROOT/ingest-audiobooks/
 2. **`parse_error`** — author directory name has 2+ consecutive single-uppercase tokens separated by spaces. `J K Rowling` → bad; `JK Rowling` → good; `George R Martin` (one middle initial) → fine.
 3. **`parse_error`** — `metadata.json` or `cover.jpg` missing at the book root.
 4. **`parse_error`** — no `.mp3` at the book root (with subcase: mp3s exist only in subdirectories → "flat layout required").
-5. **`parse_error`** — `ABS_PARSE_REGEX` doesn't match the book's relative path (Author/Book).
+5. **`parse_error`** — `AUDIOBOOKS_PARSE_REGEX` doesn't match the book's relative path (Author/Book).
 
 ### Destination
 
-The destination is `${ABS_LIBRARY_DIR}/<expanded template>/` where `<expanded template>` comes from running the source book's `Author/Book` relative path through `ABS_PARSE_REGEX` + `ABS_NAME_TEMPLATE`. Individual mp3 filenames within the book are preserved verbatim under that destination directory.
+The destination is `${AUDIOBOOKS_DIR}/<expanded template>/` where `<expanded template>` comes from running the source book's `Author/Book` relative path through `AUDIOBOOKS_PARSE_REGEX` + `AUDIOBOOKS_NAME_TEMPLATE`. Individual mp3 filenames within the book are preserved verbatim under that destination directory. The install is staged — see [Why staging?](#why-staging).
 
 The shipped default (regex `(?P<AUTHOR>[^/]+)/(?P<BOOK>.+)` + template `%AUTHOR%/%BOOK%`) is a no-op transformation — Author and Book come through unchanged. Override in `.env` if you want a flat layout (e.g. template `%AUTHOR% - %BOOK%`) or rearrange the structure.
 
@@ -271,10 +293,6 @@ Bitrate and duration are read via `ffprobe`. If `ffprobe` can't read either side
 ### Metadata coupling
 
 If at least one mp3 is installed for a book (winner or new), the script always installs `cover.jpg` and `metadata.json` too. Existing LIVE versions move to `rejected/replaced/Author/Book/` with a log noting "metadata refresh: N mp3 file(s) installed for this book". If no mp3 is installed, metadata is not touched.
-
-### Why a staging directory?
-
-AudioBookShelf scans its library aggressively. Copying directly into the live library risks ABS picking up a half-copied file. The script copies each file into a sibling `<ABS_LIBRARY_DIR> zzz/` directory first (ABS doesn't watch it); once on disk, files are `mv`'d into the live library — a same-filesystem rename that's atomic and instant. This is why the staging dir is always a sibling of the live dir, not a separately-configurable path: the rename has to stay on one filesystem.
 
 ### Stability and resume
 
@@ -310,12 +328,12 @@ Children identify themselves with short prefixes: `[tv]`, `[movie]`, `[audiobook
 
 ## Contributing / extending
 
-Pull requests welcome, especially for additional child scripts (the obvious ones being ebooks and comics). Please:
+Pull requests welcome, especially for additional child scripts (the obvious ones being ebooks, comics, and music). Please:
 
-- The audiobook live directory name must match what AudioBookShelf is configured to watch — whatever you point `ABS_LIBRARY_DIR` at, make sure ABS knows about it.
+- The live directory name must match what your downstream media server is configured to watch — whatever you point a `*_DIR` at, make sure the media server knows about it.
 - Always run with `DEBUG` first when testing against a real library root.
 - Follow the child-script contract documented above.
-- Use the helpers in `scripts/_lib.zsh` rather than re-implementing file stats / ffprobe wrappers in each new child.
+- Use the helpers in `scripts/_lib.zsh` rather than re-implementing file stats / ffprobe wrappers / staging primitives in each new child.
 - Use `scripts/_parse_name.py` for filename parsing — don't write a hand-rolled parser in each new child.
 - If you add a new required configuration key, document it in `scripts/.env.template` and validate its presence in the script's startup block.
 

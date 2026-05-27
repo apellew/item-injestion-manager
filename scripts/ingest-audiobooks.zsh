@@ -11,17 +11,17 @@
 # the first run. Shared helpers are sourced from `scripts/_lib.zsh`.
 #
 # Required .env keys:
-#   INGEST_ROOT, ABS_LIBRARY_DIR,
-#   ABS_PARSE_REGEX, ABS_NAME_TEMPLATE.
+#   INGEST_ROOT, AUDIOBOOKS_DIR,
+#   AUDIOBOOKS_PARSE_REGEX, AUDIOBOOKS_NAME_TEMPLATE.
 # All paths are absolute; no fallbacks or derived defaults.
 #
 # Destination flow per book directory:
 #   1. Source book dir: <INGEST_ROOT>/ingest-audiobooks/<rel> where <rel>
 #      is the relative path (typically "Author/Book").
-#   2. <rel> is matched against ABS_PARSE_REGEX. No match -> parse_error.
-#   3. ABS_NAME_TEMPLATE is expanded (%NAME% replaced with captures).
-#   4. Live destination: <ABS_LIBRARY_DIR>/<expanded>/
-#      Staging:          <ABS_LIBRARY_DIR> zzz/<expanded>/
+#   2. <rel> is matched against AUDIOBOOKS_PARSE_REGEX. No match -> parse_error.
+#   3. AUDIOBOOKS_NAME_TEMPLATE is expanded (%NAME% replaced with captures).
+#   4. Live destination: <AUDIOBOOKS_DIR>/<expanded>/
+#      Staging:          <AUDIOBOOKS_DIR> zzz/<expanded>/
 #   5. Individual mp3 filenames within the book are preserved verbatim.
 #
 # Pipeline per book:
@@ -30,9 +30,9 @@
 #   3. install      (cp source -> staging, mv staging -> LIVE)
 #   4. metadata     (if any mp3 installed, refresh cover.jpg + metadata.json)
 #
-# Why staging? AudioBookShelf scans aggressively. Copying directly into the
+# Why staging? Some media servers scan the live library aggressively and auto-import anything they see there. Copying directly into the
 # live library risks it picking up half-copied files. Files are copied into
-# a sibling "<LIVE_DIR> zzz" directory (which ABS does not watch); once on
+# a sibling "<LIVE_DIR> zzz" directory (which the live-library watcher does not see); once on
 # disk, they are moved into LIVE_DIR via fast same-fs renames. The "zzz"
 # suffix sorts the staging dir to the bottom in file managers.
 #
@@ -64,8 +64,8 @@
 #   <INGEST_ROOT>/ingest-audiobooks/<Author>/<Book>/{*.mp3, cover.jpg, metadata.json}
 #
 # Output:
-#   <ABS_LIBRARY_DIR>/<Author>/<Book>/...        (live library)
-#   <ABS_LIBRARY_DIR> zzz/<Author>/<Book>/...    (staging — sibling of LIVE_DIR)
+#   <AUDIOBOOKS_DIR>/<Author>/<Book>/...        (live library)
+#   <AUDIOBOOKS_DIR> zzz/<Author>/<Book>/...    (staging — sibling of LIVE_DIR)
 #   <INGEST_ROOT>/ingest-audiobooks_rejected/<category>/<Author>/<Book>/*
 #
 # Usage:
@@ -100,9 +100,9 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     print -u2 "Create $CONFIG_FILE with at least the following content:"
     print -u2 ""
     print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
-    print -u2 "    export ABS_LIBRARY_DIR=\"/path/to/your/audiobookshelf/Audiobooks\""
-    print -u2 "    export ABS_PARSE_REGEX='...'"
-    print -u2 "    export ABS_NAME_TEMPLATE='...'"
+    print -u2 "    export AUDIOBOOKS_DIR=\"/path/to/your/audiobookshelf/Audiobooks\""
+    print -u2 "    export AUDIOBOOKS_PARSE_REGEX='...'"
+    print -u2 "    export AUDIOBOOKS_NAME_TEMPLATE='...'"
   fi
   print -u2 ""
   exit 78  # EX_CONFIG
@@ -111,7 +111,7 @@ fi
 source "$CONFIG_FILE"
 
 typeset -a _missing
-for _var in INGEST_ROOT ABS_LIBRARY_DIR ABS_PARSE_REGEX ABS_NAME_TEMPLATE; do
+for _var in INGEST_ROOT AUDIOBOOKS_DIR AUDIOBOOKS_PARSE_REGEX AUDIOBOOKS_NAME_TEMPLATE; do
   if [[ -z "${(P)_var:-}" ]]; then
     _missing+=( "$_var" )
   fi
@@ -126,7 +126,7 @@ fi
 unset _missing _var _v
 
 INGEST_ROOT="${INGEST_ROOT:A}"
-ABS_LIBRARY_DIR="${ABS_LIBRARY_DIR:A}"
+AUDIOBOOKS_DIR="${AUDIOBOOKS_DIR:A}"
 
 # --- load shared helpers ---------------------------------------------------
 if [[ ! -f "$LIB_FILE" ]]; then
@@ -156,8 +156,8 @@ fi
 
 INGEST_DIR="${INGEST_ROOT}/ingest-audiobooks"
 REJECTED_DIR="${INGEST_ROOT}/ingest-audiobooks_rejected"
-# Audiobook library is whatever ABS_LIBRARY_DIR points at (required).
-LIVE_DIR="$ABS_LIBRARY_DIR"
+# Audiobook library is whatever AUDIOBOOKS_DIR points at (required).
+LIVE_DIR="$AUDIOBOOKS_DIR"
 # Staging dir is always a sibling of LIVE_DIR with a " zzz" suffix —
 # same filesystem is required so the final mv into LIVE_DIR is atomic.
 COPY_DIR="${LIVE_DIR%/} zzz"
@@ -191,10 +191,10 @@ fi
 
 # Parent of LIVE_DIR must exist — we'll mkdir LIVE_DIR itself, but won't
 # silently create an arbitrary nested tree at a path the user might have
-# typo'd in ABS_LIBRARY_DIR.
+# typo'd in AUDIOBOOKS_DIR.
 if [[ ! -d "${LIVE_DIR:h}" ]]; then
-  print -u2 "FATAL: parent directory of ABS_LIBRARY_DIR does not exist: ${LIVE_DIR:h}"
-  print -u2 "       (ABS_LIBRARY_DIR=$ABS_LIBRARY_DIR)"
+  print -u2 "FATAL: parent directory of AUDIOBOOKS_DIR does not exist: ${LIVE_DIR:h}"
+  print -u2 "       (AUDIOBOOKS_DIR=$AUDIOBOOKS_DIR)"
   exit 66
 fi
 
@@ -409,84 +409,12 @@ reject_book() {
   } > "${dest}.log"
 }
 
-# Copy a single file from source -> staging with size verification.
-# Returns 0 on success, 1 on failure (caller should bail; staging persists
-# for the next run to resume).
-stage_file() {
-  local src="$1" dst="$2" rel_label="$3"
-
-  if [[ -e "$dst" ]]; then
-    local src_sz="$(file_size "$src")"
-    local dst_sz="$(file_size "$dst")"
-    if [[ "$src_sz" == "$dst_sz" ]]; then
-      debug "staged from prior run (size matches): $rel_label"
-      return 0
-    fi
-    log "  staging size mismatch ($dst_sz vs $src_sz), recopying: $rel_label"
-    if (( DEBUG )); then
-      print -- "[DEBUG] would rm partial: $dst"
-    else
-      rm -f -- "$dst"
-    fi
-  fi
-
-  log "  COPY: $rel_label"
-  if (( DEBUG )); then
-    print -- "[DEBUG] would mkdir -p: ${dst:h}"
-    print -- "[DEBUG] would cp: $src -> $dst"
-    (( COPIED_COUNT += 1 ))
-    return 0
-  fi
-
-  mkdir -p -- "${dst:h}"
-  if ! cp -- "$src" "$dst"; then
-    log "ERROR: copy failed: $src -> $dst"
-    rm -f -- "$dst"
-    return 1
-  fi
-  local src_sz="$(file_size "$src")"
-  local dst_sz="$(file_size "$dst")"
-  if [[ "$src_sz" != "$dst_sz" ]]; then
-    log "ERROR: post-copy size mismatch ($dst_sz != $src_sz): $dst"
-    rm -f -- "$dst"
-    return 1
-  fi
-  (( COPIED_COUNT += 1 ))
-  return 0
-}
-
-# Move a single staged file into LIVE. Refuses to overwrite (if LIVE has it,
-# logs WARN and leaves staged file in place — caller should have displaced
-# the LIVE version first via reject_file/replaced).
-merge_file() {
-  local staged="$1" live="$2" rel_label="$3"
-
-  if (( DEBUG )); then
-    print -- "[DEBUG] would mkdir -p: ${live:h}"
-    print -- "[DEBUG] would mv: $staged -> $live"
-    (( MERGED_COUNT += 1 ))
-    return 0
-  fi
-
-  if [[ ! -e "$staged" ]]; then
-    return 0
-  fi
-  if [[ -e "$live" ]]; then
-    log "  WARN live unexpectedly already has file, leaving in staging: $rel_label"
-    return 0
-  fi
-
-  mkdir -p -- "${live:h}"
-  log "  MERGE: $rel_label"
-  mv -- "$staged" "$live"
-  (( MERGED_COUNT += 1 ))
-  return 0
-}
-
 # Stage source -> staging; then if LIVE has the target, displace it to
 # rejected/replaced/ with a .log; then merge staging -> LIVE. Order matters:
 # stage first so that a copy failure leaves LIVE intact.
 # Returns 0 on success (file is in LIVE), 1 on stage failure.
+# Bumps COPIED_COUNT and MERGED_COUNT explicitly — the lib versions of
+# stage_file / merge_file are pure and don't touch caller-side counters.
 install_or_replace() {
   local source_file="$1" live_file="$2" copy_file="$3" rel_path="$4"
   local replace_reason="$5" replace_extra="${6:-}"
@@ -494,12 +422,15 @@ install_or_replace() {
   if ! stage_file "$source_file" "$copy_file" "$rel_path"; then
     return 1
   fi
+  (( COPIED_COUNT += 1 ))
 
   if [[ -e "$live_file" ]]; then
     reject_file "$live_file" "replaced" "$rel_path" "$replace_reason" "$replace_extra"
   fi
 
-  merge_file "$copy_file" "$live_file" "$rel_path"
+  if merge_file "$copy_file" "$live_file" "$rel_path"; then
+    (( MERGED_COUNT += 1 ))
+  fi
   return 0
 }
 
@@ -647,11 +578,11 @@ for book_dir in "${books[@]}"; do
   # The source's Author/Book relative path goes through the regex; the
   # template expands to the destination relative path. Default behaviour
   # (no-op, preserving Author/Book structure) requires:
-  #   ABS_PARSE_REGEX='(?P<AUTHOR>[^/]+)/(?P<BOOK>.+)'
-  #   ABS_NAME_TEMPLATE='%AUTHOR%/%BOOK%'
+  #   AUDIOBOOKS_PARSE_REGEX='(?P<AUTHOR>[^/]+)/(?P<BOOK>.+)'
+  #   AUDIOBOOKS_NAME_TEMPLATE='%AUTHOR%/%BOOK%'
   local dest_rel
-  if ! dest_rel="$(python3 "$PARSE_HELPER" "$ABS_PARSE_REGEX" "$ABS_NAME_TEMPLATE" "$rel" 2>/dev/null)"; then
-    reject_book "$book_dir" "parse_error" "ABS_PARSE_REGEX did not match: '$rel'"
+  if ! dest_rel="$(python3 "$PARSE_HELPER" "$AUDIOBOOKS_PARSE_REGEX" "$AUDIOBOOKS_NAME_TEMPLATE" "$rel" 2>/dev/null)"; then
+    reject_book "$book_dir" "parse_error" "AUDIOBOOKS_PARSE_REGEX did not match: '$rel'"
     continue
   fi
   log "  dest: '$rel' -> '$dest_rel'"
