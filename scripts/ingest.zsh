@@ -1,7 +1,7 @@
 #!/bin/zsh
-# jellyfin-ingest.zsh
+# ingest.zsh
 # ---------------------------------------------------------------------------
-# Parent orchestrator: discovers and runs jellyfin-ingest-*.zsh child scripts,
+# Parent orchestrator: discovers and runs ingest-*.zsh child scripts,
 # then waits and repeats. Exit with Ctrl-C.
 #
 # Configuration is read from `scripts/.env` (sibling of this script). Copy
@@ -13,10 +13,10 @@
 # environment.
 #
 # Usage:
-#   jellyfin-ingest.zsh [DEBUG]
+#   ingest.zsh [DEBUG]
 #
 # Child script contract:
-#   - Named jellyfin-ingest-<type>.zsh in the same directory as this script.
+#   - Named ingest-<type>.zsh in the same directory as this script.
 #   - Called with: [DEBUG]
 #   - Inherits INGEST_ROOT and LIBRARY_ROOT from the env (also sources
 #     .env defensively, so standalone runs work too).
@@ -102,7 +102,7 @@ log() { print -- "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 # Graceful exit on Ctrl-C.
 trap 'print ""; log "interrupted — exiting"; exit 0' INT
 
-log "jellyfin-ingest orchestrator starting (Ctrl-C to stop)"
+log "ingest orchestrator starting (Ctrl-C to stop)"
 log "  script dir   = $SCRIPT_DIR"
 log "  config file  = $CONFIG_FILE"
 log "  ingest root  = $INGEST_ROOT"
@@ -133,10 +133,10 @@ while true; do
   log "========================================"
 
   typeset -a children
-  children=( "$SCRIPT_DIR"/jellyfin-ingest-*.zsh(.N) )
+  children=( "$SCRIPT_DIR"/ingest-*.zsh(.N) )
 
   if (( ${#children[@]} == 0 )); then
-    log "WARNING: no child scripts found matching $SCRIPT_DIR/jellyfin-ingest-*.zsh"
+    log "WARNING: no child scripts found matching $SCRIPT_DIR/ingest-*.zsh"
   else
     log "found ${#children[@]} child script(s)"
   fi

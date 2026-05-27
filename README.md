@@ -8,9 +8,9 @@ A parent orchestrator script runs continuously and discovers per-media-type chil
 
 | Script | Role |
 |---|---|
-| [`scripts/jellyfin-ingest.zsh`](scripts/jellyfin-ingest.zsh) | Parent orchestrator. Runs each `jellyfin-ingest-*.zsh` child every 120 s. Sleeps for an hour and rechecks when the library root is unreachable (e.g. NAS off-network). |
-| [`scripts/jellyfin-ingest-video.zsh`](scripts/jellyfin-ingest-video.zsh) | Video child. Validates `.m4v` files (HEVC/H.265, minimum duration), classifies each as TV episode or Movie, and moves into a Jellyfin-style library layout. Conflict resolution by resolution + file size. |
-| [`scripts/jellyfin-ingest-audiobooks.zsh`](scripts/jellyfin-ingest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Uses a staging directory so ABS doesn't pick up half-copied files. |
+| [`scripts/ingest.zsh`](scripts/ingest.zsh) | Parent orchestrator. Runs each `ingest-*.zsh` child every 120 s. Sleeps for an hour and rechecks when the library root is unreachable (e.g. NAS off-network). |
+| [`scripts/ingest-video.zsh`](scripts/ingest-video.zsh) | Video child. Validates `.m4v` files (HEVC/H.265, minimum duration), classifies each as TV episode or Movie, and moves into a Jellyfin-style library layout. Conflict resolution by resolution + file size. |
+| [`scripts/ingest-audiobooks.zsh`](scripts/ingest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Uses a staging directory so ABS doesn't pick up half-copied files. |
 | [`scripts/.env.template`](scripts/.env.template) | Annotated configuration template. Copy to `scripts/.env` and edit. |
 
 ## Requirements
@@ -32,7 +32,7 @@ cp scripts/.env.template scripts/.env
 $EDITOR scripts/.env
 
 # Dry-run first — see what it would do without touching any files.
-./scripts/jellyfin-ingest.zsh DEBUG
+./scripts/ingest.zsh DEBUG
 ```
 
 `DEBUG` is an optional positional flag. When passed, every `mkdir`, `cp`, `mv`, `rm`, and `rmdir` is logged as `[DEBUG] would …` and **not** performed. Always run with `DEBUG` first against a new library root to verify the planned operations look right.
@@ -40,7 +40,7 @@ $EDITOR scripts/.env
 Once you're happy with the dry-run output, run without the flag:
 
 ```sh
-./scripts/jellyfin-ingest.zsh
+./scripts/ingest.zsh
 ```
 
 ## Configuration
@@ -103,18 +103,19 @@ The `zzz` suffix on the staging dir is deliberate: it sorts to the bottom in fil
 
 ## Orchestrator behaviour
 
-Run `jellyfin-ingest.zsh [DEBUG]` as a long-lived foreground process. Ctrl-C to stop.
+Run `ingest.zsh [DEBUG]` as a long-lived foreground process. Ctrl-C to stop.
 
 On each 120-second tick it:
 
 1. Verifies `$LIBRARY_ROOT` is reachable as a directory. If not, it sleeps an hour and rechecks (intended for laptops that roam off the home network).
-2. Globs siblings matching `jellyfin-ingest-*.zsh` and runs each in turn, forwarding only the `DEBUG` flag if present. Children inherit `INGEST_ROOT` and `LIBRARY_ROOT` from the environment.
+2. Globs siblings matching `ingest-*.zsh` and runs each in turn, forwarding only the `DEBUG` flag if present. Children inherit `INGEST_ROOT` and `LIBRARY_ROOT` from the environment.
 3. A child failing logs a warning but does not abort the other children.
 
 ### Adding a new child
 
-Drop a `jellyfin-ingest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orchestrator picks it up on its next loop with no config change. The contract for a child is:
+Drop an `ingest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orchestrator picks it up on its next loop with no config change. The contract for a child is:
 
+- The filename must match `ingest-*.zsh` (the dash after `ingest` is load-bearing — it's what prevents the orchestrator from matching its own glob and recursively running itself).
 - Accept `[DEBUG]` as the only positional argument.
 - Source `scripts/.env` at startup (so standalone testing works) and validate that `INGEST_ROOT` and `LIBRARY_ROOT` are set.
 - Be a single-run script (run once, exit).

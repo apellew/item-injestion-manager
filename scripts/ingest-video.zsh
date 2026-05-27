@@ -1,5 +1,5 @@
 #!/bin/zsh
-# jellyfin-ingest-video.zsh
+# ingest-video.zsh
 # ---------------------------------------------------------------------------
 # Video ingestion child: scans <INGEST_ROOT>/ingest-video for .m4v files,
 # validates them (H.265 + duration), classifies each as Movie or TV episode,
@@ -10,8 +10,8 @@
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before
 # the first run.
 #
-# Called by the parent orchestrator (jellyfin-ingest.zsh) or standalone:
-#   jellyfin-ingest-video.zsh [DEBUG]
+# Called by the parent orchestrator (ingest.zsh) or standalone:
+#   ingest-video.zsh [DEBUG]
 # ---------------------------------------------------------------------------
 
 emulate -L zsh
