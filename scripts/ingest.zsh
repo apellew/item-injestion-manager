@@ -8,9 +8,15 @@
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before the
 # first run. The template documents each required key.
 #
-# Each child script handles a specific media type (video, books, audiobooks,
-# etc). Children inherit INGEST_ROOT and LIBRARY_ROOT from this process's
-# environment.
+# The orchestrator itself only requires INGEST_ROOT in .env. Each child
+# script validates its own additional required keys (JELLYFIN_MOVIES_DIR /
+# JELLYFIN_TV_DIR for the video child, ABS_LIBRARY_DIR for the audiobook
+# child, etc.) when it starts.
+#
+# Optional: if LIBRARY_ROOT is set in .env, the orchestrator uses it as a
+# "is the NAS reachable?" probe and waits when the directory is unavailable.
+# If LIBRARY_ROOT is unset, the probe is skipped — children fail
+# individually if their library is unreachable.
 #
 # Usage:
 #   ingest.zsh [DEBUG]
@@ -18,8 +24,8 @@
 # Child script contract:
 #   - Named ingest-<type>.zsh in the same directory as this script.
 #   - Called with: [DEBUG]
-#   - Inherits INGEST_ROOT and LIBRARY_ROOT from the env (also sources
-#     .env defensively, so standalone runs work too).
+#   - Inherits the .env environment from this process (also sources .env
+#     defensively, so standalone runs work too).
 #   - Must be a single-run script (run once, then exit).
 #   - Exit code 0 = success. Non-zero = logged as a warning but does not
 #     stop other children from running.
@@ -51,7 +57,6 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     print -u2 "Create $CONFIG_FILE with at least the following content:"
     print -u2 ""
     print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
-    print -u2 "    export LIBRARY_ROOT=\"/path/to/your/library\""
   fi
   print -u2 ""
   exit 78  # EX_CONFIG
@@ -59,9 +64,10 @@ fi
 
 source "$CONFIG_FILE"
 
-# Validate that the required keys are set and non-empty.
+# Validate that the orchestrator's required keys are set and non-empty.
+# Children validate their own additional required keys independently.
 typeset -a _missing
-for _var in INGEST_ROOT LIBRARY_ROOT; do
+for _var in INGEST_ROOT; do
   if [[ -z "${(P)_var:-}" ]]; then
     _missing+=( "$_var" )
   fi
@@ -75,10 +81,14 @@ if (( ${#_missing[@]} > 0 )); then
 fi
 unset _missing _var _v
 
-# Normalise paths now that the values are set.
+# Normalise INGEST_ROOT (always required). LIBRARY_ROOT is optional;
+# normalise only if set.
 INGEST_ROOT="${INGEST_ROOT:A}"
-LIBRARY_ROOT="${LIBRARY_ROOT:A}"
-export INGEST_ROOT LIBRARY_ROOT
+export INGEST_ROOT
+if [[ -n "${LIBRARY_ROOT:-}" ]]; then
+  LIBRARY_ROOT="${LIBRARY_ROOT:A}"
+  export LIBRARY_ROOT
+fi
 
 # --- argument parsing -------------------------------------------------------
 DEBUG_ARG=""
@@ -106,27 +116,35 @@ log "ingest orchestrator starting (Ctrl-C to stop)"
 log "  script dir   = $SCRIPT_DIR"
 log "  config file  = $CONFIG_FILE"
 log "  ingest root  = $INGEST_ROOT"
-log "  library root = $LIBRARY_ROOT"
+if [[ -n "${LIBRARY_ROOT:-}" ]]; then
+  log "  library root = $LIBRARY_ROOT (availability probed each tick)"
+else
+  log "  library root = <not set; availability probe disabled>"
+fi
 log "  debug        = ${DEBUG_ARG:-off}"
 log "  loop sleep   = ${LOOP_SLEEP_SECONDS}s"
 
 # --- main loop --------------------------------------------------------------
 while true; do
 
-  # --- library availability check ------------------------------------------
+  # --- library availability check (optional) -------------------------------
   # The target is on a remote server and may not be reachable (e.g. laptop
-  # is off the home network). Wait an hour between checks until it's back.
-  while [[ ! -d "$LIBRARY_ROOT" ]]; do
-    log "WARNING: library root not available: $LIBRARY_ROOT"
-    log "sleeping $(( UNAVAILABLE_CHECK_SECONDS / 60 ))m before rechecking..."
-    local remaining=$UNAVAILABLE_CHECK_SECONDS
-    while (( remaining > 0 )); do
-      printf "\r\033[KLibrary unavailable — next check in %d:%02d " $(( remaining / 60 )) $(( remaining % 60 ))
-      sleep 1
-      (( remaining -= 1 ))
+  # is off the home network). If LIBRARY_ROOT is set in .env, wait for it
+  # to become available before running children. If LIBRARY_ROOT is unset,
+  # skip the probe and let each child fail individually if needed.
+  if [[ -n "${LIBRARY_ROOT:-}" ]]; then
+    while [[ ! -d "$LIBRARY_ROOT" ]]; do
+      log "WARNING: library root not available: $LIBRARY_ROOT"
+      log "sleeping $(( UNAVAILABLE_CHECK_SECONDS / 60 ))m before rechecking..."
+      local remaining=$UNAVAILABLE_CHECK_SECONDS
+      while (( remaining > 0 )); do
+        printf "\r\033[KLibrary unavailable — next check in %d:%02d " $(( remaining / 60 )) $(( remaining % 60 ))
+        sleep 1
+        (( remaining -= 1 ))
+      done
+      printf "\r\033[K"
     done
-    printf "\r\033[K"
-  done
+  fi
 
   log "========================================"
   log "=== orchestrator run starting ==="

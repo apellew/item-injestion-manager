@@ -8,9 +8,9 @@ A parent orchestrator script runs continuously and discovers per-media-type chil
 
 | Script | Role |
 |---|---|
-| [`scripts/ingest.zsh`](scripts/ingest.zsh) | Parent orchestrator. Runs each `ingest-*.zsh` child every 120 s. Sleeps for an hour and rechecks when the library root is unreachable (e.g. NAS off-network). |
-| [`scripts/ingest-video.zsh`](scripts/ingest-video.zsh) | Video child. Validates `.m4v` files (HEVC/H.265, minimum duration), classifies each as TV episode or Movie, and moves into a Jellyfin-style library layout. Conflict resolution by resolution + file size. |
-| [`scripts/ingest-audiobooks.zsh`](scripts/ingest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Uses a staging directory so ABS doesn't pick up half-copied files. |
+| [`scripts/ingest.zsh`](scripts/ingest.zsh) | Parent orchestrator. Runs each `ingest-*.zsh` child every 120 s. If `LIBRARY_ROOT` is set in .env, waits when the directory is unreachable (e.g. NAS off-network); otherwise skips that probe. |
+| [`scripts/ingest-video.zsh`](scripts/ingest-video.zsh) | Video child. Validates `.m4v` files (HEVC/H.265, minimum duration), classifies each as TV episode or Movie, and moves into `JELLYFIN_TV_DIR` or `JELLYFIN_MOVIES_DIR`. Conflict resolution by resolution + file size. |
+| [`scripts/ingest-audiobooks.zsh`](scripts/ingest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Writes to `ABS_LIBRARY_DIR`. Uses a sibling staging directory so ABS doesn't pick up half-copied files. |
 | [`scripts/.env.template`](scripts/.env.template) | Annotated configuration template. Copy to `scripts/.env` and edit. |
 
 ## Requirements
@@ -27,7 +27,7 @@ git clone https://github.com/<your-account>/item-ingestion-manager.git
 cd item-ingestion-manager
 chmod +x scripts/*.zsh
 
-# Create your local config from the template, then fill in the two paths.
+# Create your local config from the template, then fill in the paths.
 cp scripts/.env.template scripts/.env
 $EDITOR scripts/.env
 
@@ -57,26 +57,35 @@ Copy it and fill in your paths, then re-run this script:
     $EDITOR '.../scripts/.env'
 ```
 
-The template documents each key. The required minimum:
+Each script validates its own required keys at startup. Missing required keys produce a clear stderr error and a non-zero exit (so launchd / cron register the failure rather than silently no-opping).
+
+### Required keys
+
+All values are full absolute paths. No fallbacks, no derived defaults.
+
+| Key | Required by | Purpose |
+|---|---|---|
+| `INGEST_ROOT` | every script | Root of the local "ingest" directory tree. Each child watches a subdirectory under this. |
+| `JELLYFIN_MOVIES_DIR` | `ingest-video.zsh` | Where movies land. |
+| `JELLYFIN_TV_DIR` | `ingest-video.zsh` | Where TV episodes land. |
+| `ABS_LIBRARY_DIR` | `ingest-audiobooks.zsh` | The AudioBookShelf live library directory itself (NOT a parent). The staging directory is derived as a sibling with a ` zzz` suffix. |
+
+### Optional convenience: `LIBRARY_ROOT`
+
+`LIBRARY_ROOT` is **not read directly by any script**. It's provided as a convenience for users whose libraries all live under a single root — you can set it in `.env` and reference it in your other key definitions:
 
 ```zsh
-export INGEST_ROOT="/path/to/your/ingest"
-export LIBRARY_ROOT="/path/to/your/library"
+export LIBRARY_ROOT="/Volumes/nas/media"
+export JELLYFIN_MOVIES_DIR="${LIBRARY_ROOT}/Movies"
+export JELLYFIN_TV_DIR="${LIBRARY_ROOT}/TV"
+export ABS_LIBRARY_DIR="${LIBRARY_ROOT}/ABS Audiobooks"
 ```
 
-Optional keys override defaults:
-
-```zsh
-# Audiobook library lives somewhere other than <LIBRARY_ROOT>/ABS Audiobooks
-# (e.g. a different volume, or the default ABS "Audiobooks" folder name).
-export ABS_LIBRARY_DIR="/path/to/your/audiobookshelf/Audiobooks"
-```
-
-Both children read the same `.env` file (sibling of the orchestrator), so configuration is shared automatically.
+Users with libraries on different volumes can leave `LIBRARY_ROOT` unset and write absolute paths directly. There's one side effect of setting it: the orchestrator uses it as an "is the NAS reachable?" probe and waits when the directory is unavailable. If `LIBRARY_ROOT` is unset, the probe is skipped and individual children fail if their library is unreachable.
 
 ## Directory layout
 
-Children derive their working subdirectories from the configured roots:
+Each script watches its own ingest subdirectory and writes to its own configured library directory:
 
 ```
 $INGEST_ROOT/
@@ -84,22 +93,27 @@ $INGEST_ROOT/
 ├── ingest-video_rejected/
 ├── ingest-audiobook/                   (audiobook child watches this)
 └── ingest-audiobook_rejected/
-
-$LIBRARY_ROOT/
-├── Movies/                             (Jellyfin)
-└── TV/                                 (Jellyfin)
 ```
 
-The audiobook live and staging directories default to `$LIBRARY_ROOT/ABS Audiobooks` and `$LIBRARY_ROOT/ABS Audiobooks zzz` for backwards compatibility, but if `ABS_LIBRARY_DIR` is set in `.env`, the library lives wherever you point it and the staging directory is computed as a sibling with a ` zzz` suffix:
+Library destinations are each configured independently — they can live on the same volume as each other or different ones. A typical "everything on one NAS" layout might look like:
 
 ```
-# With ABS_LIBRARY_DIR=/Volumes/nas/audiobookshelf/Audiobooks
-/Volumes/nas/audiobookshelf/
-├── Audiobooks/                         (AudioBookShelf live library)
-└── Audiobooks zzz/                     (staging — sibling of LIVE_DIR, same fs)
+$JELLYFIN_MOVIES_DIR        → /Volumes/nas/media/Movies
+$JELLYFIN_TV_DIR            → /Volumes/nas/media/TV
+$ABS_LIBRARY_DIR            → /Volumes/nas/media/ABS Audiobooks
+                              (staging at /Volumes/nas/media/ABS Audiobooks zzz)
 ```
 
-The `zzz` suffix on the staging dir is deliberate: it sorts to the bottom in file managers and signals to humans "not part of the live library".
+…while a split-volume layout might look like:
+
+```
+$JELLYFIN_MOVIES_DIR        → /Volumes/jellyfin/Movies
+$JELLYFIN_TV_DIR            → /Volumes/jellyfin/TV
+$ABS_LIBRARY_DIR            → /Volumes/audiobookshelf/Audiobooks
+                              (staging at /Volumes/audiobookshelf/Audiobooks zzz)
+```
+
+The `zzz` suffix on the audiobook staging dir is deliberate: it sorts to the bottom in file managers and signals to humans "not part of the live library".
 
 ## Orchestrator behaviour
 
@@ -107,8 +121,8 @@ Run `ingest.zsh [DEBUG]` as a long-lived foreground process. Ctrl-C to stop.
 
 On each 120-second tick it:
 
-1. Verifies `$LIBRARY_ROOT` is reachable as a directory. If not, it sleeps an hour and rechecks (intended for laptops that roam off the home network).
-2. Globs siblings matching `ingest-*.zsh` and runs each in turn, forwarding only the `DEBUG` flag if present. Children inherit `INGEST_ROOT` and `LIBRARY_ROOT` from the environment.
+1. **If `LIBRARY_ROOT` is set in `.env`,** verifies it's reachable as a directory. If not, sleeps an hour and rechecks (intended for laptops that roam off the home network). If `LIBRARY_ROOT` is unset, this probe is skipped and each child is run regardless — they'll fail individually if their library is unreachable.
+2. Globs siblings matching `ingest-*.zsh` and runs each in turn, forwarding only the `DEBUG` flag if present. Children inherit the full `.env` environment from the orchestrator.
 3. A child failing logs a warning but does not abort the other children.
 
 ### Adding a new child
@@ -117,7 +131,7 @@ Drop an `ingest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orch
 
 - The filename must match `ingest-*.zsh` (the dash after `ingest` is load-bearing — it's what prevents the orchestrator from matching its own glob and recursively running itself).
 - Accept `[DEBUG]` as the only positional argument.
-- Source `scripts/.env` at startup (so standalone testing works) and validate that `INGEST_ROOT` and `LIBRARY_ROOT` are set.
+- Source `scripts/.env` at startup (so standalone testing works) and validate that its own required keys are set.
 - Be a single-run script (run once, exit).
 - Return 0 on success; non-zero is logged as a warning.
 
@@ -136,7 +150,7 @@ Expects `.m4v` files in `$INGEST_ROOT/ingest-video/` (recursive).
 
 Classification heuristics:
 
-- **TV episode** if the filename contains `SxxEyy` or `NxNN` (case-insensitive). Year is parsed from `(YYYY)` in the filename, or inferred by fuzzy-matching the show name against existing `TV/` library directories.
+- **TV episode** if the filename contains `SxxEyy` or `NxNN` (case-insensitive). Year is parsed from `(YYYY)` in the filename, or inferred by fuzzy-matching the show name against existing `JELLYFIN_TV_DIR` subdirectories.
 - **Movie** otherwise. Year optional.
 
 Conflict resolution: higher video height wins; file size is the tiebreak.
@@ -154,7 +168,7 @@ Expects strictly `Author/Book/` (depth 2) under `$INGEST_ROOT/ingest-audiobook/`
 
 ### Per-mp3 conflict resolution
 
-For each `.mp3` in the source book, matched by filename against the live library (`$ABS_LIBRARY_DIR/<Author>/<Book>/`, or `$LIBRARY_ROOT/ABS Audiobooks/<Author>/<Book>/` if `ABS_LIBRARY_DIR` isn't set):
+For each `.mp3` in the source book, matched by filename against `$ABS_LIBRARY_DIR/<Author>/<Book>/`:
 
 | Situation | Decision | Action |
 |---|---|---|
@@ -172,7 +186,7 @@ If at least one mp3 is installed for a book (winner or new), the script always i
 
 ### Why a staging directory?
 
-AudioBookShelf scans its library aggressively. Copying directly into the live library risks ABS picking up a half-copied file. The script copies each file into a sibling `<LIVE_DIR> zzz/` directory first (ABS doesn't watch it); once on disk, files are `mv`'d into the live library — a same-filesystem rename that's atomic and instant. This is why the staging dir is always a sibling of the live dir, not a separately-configurable path: the rename has to stay on one filesystem.
+AudioBookShelf scans its library aggressively. Copying directly into the live library risks ABS picking up a half-copied file. The script copies each file into a sibling `<ABS_LIBRARY_DIR> zzz/` directory first (ABS doesn't watch it); once on disk, files are `mv`'d into the live library — a same-filesystem rename that's atomic and instant. This is why the staging dir is always a sibling of the live dir, not a separately-configurable path: the rename has to stay on one filesystem.
 
 ### Stability and resume
 
@@ -210,7 +224,7 @@ All logs share the pattern:
 
 Pull requests welcome, especially for additional child scripts (the obvious ones being ebooks and comics). Please:
 
-- The audiobook live directory name must match what AudioBookShelf is configured to watch — whatever you point `ABS_LIBRARY_DIR` at (or the default `ABS Audiobooks`), make sure ABS knows about it.
+- The audiobook live directory name must match what AudioBookShelf is configured to watch — whatever you point `ABS_LIBRARY_DIR` at, make sure ABS knows about it.
 - Always run with `DEBUG` first when testing against a real library root.
 - Follow the child-script contract documented above.
 - If you add a new required configuration key, document it in `scripts/.env.template` and validate its presence in the script's startup block.

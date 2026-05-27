@@ -3,12 +3,15 @@
 # ---------------------------------------------------------------------------
 # Video ingestion child: scans <INGEST_ROOT>/ingest-video for .m4v files,
 # validates them (H.265 + duration), classifies each as Movie or TV episode,
-# and moves into a Jellyfin-style library layout under <LIBRARY_ROOT>/Movies
-# and <LIBRARY_ROOT>/TV. Conflicts resolved by resolution (size tiebreak).
+# and moves into a Jellyfin-style library layout under JELLYFIN_MOVIES_DIR
+# and JELLYFIN_TV_DIR. Conflicts resolved by resolution (size tiebreak).
 #
 # Configuration is read from `scripts/.env` (sibling of this script). Copy
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before
 # the first run.
+#
+# Required .env keys: INGEST_ROOT, JELLYFIN_MOVIES_DIR, JELLYFIN_TV_DIR.
+# All paths are absolute; no fallbacks or derived defaults.
 #
 # Called by the parent orchestrator (ingest.zsh) or standalone:
 #   ingest-video.zsh [DEBUG]
@@ -40,7 +43,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     print -u2 "Create $CONFIG_FILE with at least the following content:"
     print -u2 ""
     print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
-    print -u2 "    export LIBRARY_ROOT=\"/path/to/your/library\""
+    print -u2 "    export JELLYFIN_MOVIES_DIR=\"/path/to/your/jellyfin/Movies\""
+    print -u2 "    export JELLYFIN_TV_DIR=\"/path/to/your/jellyfin/TV\""
   fi
   print -u2 ""
   exit 78  # EX_CONFIG
@@ -49,7 +53,7 @@ fi
 source "$CONFIG_FILE"
 
 typeset -a _missing
-for _var in INGEST_ROOT LIBRARY_ROOT; do
+for _var in INGEST_ROOT JELLYFIN_MOVIES_DIR JELLYFIN_TV_DIR; do
   if [[ -z "${(P)_var:-}" ]]; then
     _missing+=( "$_var" )
   fi
@@ -64,7 +68,8 @@ fi
 unset _missing _var _v
 
 INGEST_ROOT="${INGEST_ROOT:A}"
-LIBRARY_ROOT="${LIBRARY_ROOT:A}"
+JELLYFIN_MOVIES_DIR="${JELLYFIN_MOVIES_DIR:A}"
+JELLYFIN_TV_DIR="${JELLYFIN_TV_DIR:A}"
 
 # --- argument parsing -------------------------------------------------------
 DEBUG=0
@@ -82,8 +87,8 @@ fi
 
 INGEST_DIR="${INGEST_ROOT}/ingest-video"
 REJECTED_DIR="${INGEST_ROOT}/ingest-video_rejected"
-MOVIES_DIR="${LIBRARY_ROOT}/Movies"
-TV_DIR="${LIBRARY_ROOT}/TV"
+MOVIES_DIR="$JELLYFIN_MOVIES_DIR"
+TV_DIR="$JELLYFIN_TV_DIR"
 
 MIN_DURATION_SECONDS=120      # 2 minutes (content validation)
 EMPTY_DIR_MIN_AGE_MIN=60      # 1 hour
@@ -100,12 +105,24 @@ for dep in ffprobe; do
   fi
 done
 
-for d in "$INGEST_DIR" "$LIBRARY_ROOT"; do
-  if [[ ! -d "$d" ]]; then
-    print -u2 "FATAL: directory does not exist: $d"
-    exit 66
-  fi
-done
+if [[ ! -d "$INGEST_DIR" ]]; then
+  print -u2 "FATAL: directory does not exist: $INGEST_DIR"
+  exit 66
+fi
+
+# Parent of each destination must exist — we'll mkdir the destination
+# itself, but won't silently create a nested tree at a path the user
+# might have typo'd in JELLYFIN_MOVIES_DIR / JELLYFIN_TV_DIR.
+if [[ ! -d "${MOVIES_DIR:h}" ]]; then
+  print -u2 "FATAL: parent directory of JELLYFIN_MOVIES_DIR does not exist: ${MOVIES_DIR:h}"
+  print -u2 "       (JELLYFIN_MOVIES_DIR=$MOVIES_DIR)"
+  exit 66
+fi
+if [[ ! -d "${TV_DIR:h}" ]]; then
+  print -u2 "FATAL: parent directory of JELLYFIN_TV_DIR does not exist: ${TV_DIR:h}"
+  print -u2 "       (JELLYFIN_TV_DIR=$TV_DIR)"
+  exit 66
+fi
 
 # Ensure writable output scaffolding exists.
 for d in "$REJECTED_DIR" "$MOVIES_DIR" "$TV_DIR"; do
