@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# zsh / shell artefacts
+*.zwc
+
+# Logs and temporary runtime data
+*.log
+*.tmp
+*.bak
+*.part
+*.crdownload
+
+# Local / private notes that shouldn't ship
+NOTES.local.md
+TODO.local.md
