@@ -18,8 +18,9 @@
 #
 # Why staging? AudioBookShelf scans aggressively. Copying directly into the
 # live library risks it picking up half-copied files. Files are copied into
-# "ABS Audiobooks zzz" (which ABS does not watch); once on disk, they are
-# moved into "ABS Audiobooks" via fast same-fs renames.
+# a sibling "<LIVE_DIR> zzz" directory (which ABS does not watch); once on
+# disk, they are moved into LIVE_DIR via fast same-fs renames. The "zzz"
+# suffix sorts the staging dir to the bottom in file managers.
 #
 # Per-mp3 conflict resolution (matched by filename):
 #   no LIVE counterpart                                  ->  install fresh
@@ -49,9 +50,13 @@
 #   <INGEST_ROOT>/ingest-audiobook/<Author>/<Book>/{*.mp3, cover.jpg, metadata.json}
 #
 # Output:
-#   <LIBRARY_ROOT>/ABS Audiobooks/<Author>/<Book>/...        (live)
-#   <LIBRARY_ROOT>/ABS Audiobooks zzz/<Author>/<Book>/...    (staging)
+#   <LIVE_DIR>/<Author>/<Book>/...                            (live library)
+#   <LIVE_DIR> zzz/<Author>/<Book>/...                        (staging — sibling of LIVE_DIR)
 #   <INGEST_ROOT>/ingest-audiobook_rejected/<category>/<Author>/<Book>/*
+#
+# LIVE_DIR is taken from ABS_LIBRARY_DIR if set in .env, otherwise it
+# defaults to <LIBRARY_ROOT>/ABS Audiobooks for backwards compatibility.
+# See scripts/.env.template for full documentation.
 #
 # Usage:
 #   jellyfin-ingest-audiobooks.zsh [DEBUG]
@@ -108,6 +113,8 @@ unset _missing _var _v
 
 INGEST_ROOT="${INGEST_ROOT:A}"
 LIBRARY_ROOT="${LIBRARY_ROOT:A}"
+# ABS_LIBRARY_DIR is optional; normalise only if set.
+[[ -n "${ABS_LIBRARY_DIR:-}" ]] && ABS_LIBRARY_DIR="${ABS_LIBRARY_DIR:A}"
 
 # --- argument parsing -------------------------------------------------------
 DEBUG=0
@@ -125,8 +132,12 @@ fi
 
 INGEST_DIR="${INGEST_ROOT}/ingest-audiobook"
 REJECTED_DIR="${INGEST_ROOT}/ingest-audiobook_rejected"
-LIVE_DIR="${LIBRARY_ROOT}/ABS Audiobooks"
-COPY_DIR="${LIBRARY_ROOT}/ABS Audiobooks zzz"
+# Audiobook library: ABS_LIBRARY_DIR if set, else the legacy location
+# under <LIBRARY_ROOT> for backwards compatibility with existing setups.
+LIVE_DIR="${ABS_LIBRARY_DIR:-${LIBRARY_ROOT}/ABS Audiobooks}"
+# Staging dir is always a sibling of LIVE_DIR with a " zzz" suffix —
+# same filesystem is required so the final mv into LIVE_DIR is atomic.
+COPY_DIR="${LIVE_DIR%/} zzz"
 
 # Audio extensions other than .mp3 that disqualify a book (wrong_type).
 typeset -aU NON_MP3_AUDIO_EXTS=( m4a m4b mp4 flac wav ogg oga aac wma opus alac ape dsf dff aiff aif )
@@ -154,6 +165,19 @@ for d in "$INGEST_DIR" "$LIBRARY_ROOT"; do
     exit 66
   fi
 done
+
+# Parent of LIVE_DIR must exist — we'll mkdir LIVE_DIR itself, but won't
+# silently create an arbitrary nested tree at a path the user might have
+# typo'd in ABS_LIBRARY_DIR. (For the legacy fallback, this is LIBRARY_ROOT,
+# which we've already validated above; the extra check is a no-op there.)
+if [[ ! -d "${LIVE_DIR:h}" ]]; then
+  print -u2 "FATAL: parent directory of audiobook library does not exist: ${LIVE_DIR:h}"
+  print -u2 "       (LIVE_DIR=$LIVE_DIR)"
+  if [[ -n "${ABS_LIBRARY_DIR:-}" ]]; then
+    print -u2 "       Check ABS_LIBRARY_DIR in $CONFIG_FILE."
+  fi
+  exit 66
+fi
 
 for d in "$REJECTED_DIR" "$LIVE_DIR" "$COPY_DIR"; do
   if [[ ! -d "$d" ]]; then

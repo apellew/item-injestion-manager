@@ -57,18 +57,26 @@ Copy it and fill in your paths, then re-run this script:
     $EDITOR '.../scripts/.env'
 ```
 
-The template documents each required key. At minimum you need:
+The template documents each key. The required minimum:
 
 ```zsh
 export INGEST_ROOT="/path/to/your/ingest"
 export LIBRARY_ROOT="/path/to/your/library"
 ```
 
+Optional keys override defaults:
+
+```zsh
+# Audiobook library lives somewhere other than <LIBRARY_ROOT>/ABS Audiobooks
+# (e.g. a different volume, or the default ABS "Audiobooks" folder name).
+export ABS_LIBRARY_DIR="/path/to/your/audiobookshelf/Audiobooks"
+```
+
 Both children read the same `.env` file (sibling of the orchestrator), so configuration is shared automatically.
 
 ## Directory layout
 
-Children derive their working subdirectories from the two configured roots:
+Children derive their working subdirectories from the configured roots:
 
 ```
 $INGEST_ROOT/
@@ -79,9 +87,16 @@ $INGEST_ROOT/
 
 $LIBRARY_ROOT/
 ├── Movies/                             (Jellyfin)
-├── TV/                                 (Jellyfin)
-├── ABS Audiobooks/                     (AudioBookShelf live library)
-└── ABS Audiobooks zzz/                 (audiobook staging — ABS does not watch)
+└── TV/                                 (Jellyfin)
+```
+
+The audiobook live and staging directories default to `$LIBRARY_ROOT/ABS Audiobooks` and `$LIBRARY_ROOT/ABS Audiobooks zzz` for backwards compatibility, but if `ABS_LIBRARY_DIR` is set in `.env`, the library lives wherever you point it and the staging directory is computed as a sibling with a ` zzz` suffix:
+
+```
+# With ABS_LIBRARY_DIR=/Volumes/nas/audiobookshelf/Audiobooks
+/Volumes/nas/audiobookshelf/
+├── Audiobooks/                         (AudioBookShelf live library)
+└── Audiobooks zzz/                     (staging — sibling of LIVE_DIR, same fs)
 ```
 
 The `zzz` suffix on the staging dir is deliberate: it sorts to the bottom in file managers and signals to humans "not part of the live library".
@@ -138,7 +153,7 @@ Expects strictly `Author/Book/` (depth 2) under `$INGEST_ROOT/ingest-audiobook/`
 
 ### Per-mp3 conflict resolution
 
-For each `.mp3` in the source book, matched by filename against `$LIBRARY_ROOT/ABS Audiobooks/<Author>/<Book>/`:
+For each `.mp3` in the source book, matched by filename against the live library (`$ABS_LIBRARY_DIR/<Author>/<Book>/`, or `$LIBRARY_ROOT/ABS Audiobooks/<Author>/<Book>/` if `ABS_LIBRARY_DIR` isn't set):
 
 | Situation | Decision | Action |
 |---|---|---|
@@ -156,7 +171,7 @@ If at least one mp3 is installed for a book (winner or new), the script always i
 
 ### Why a staging directory?
 
-AudioBookShelf scans its library aggressively. Copying directly into `ABS Audiobooks/` risks ABS picking up a half-copied file. The script copies each file into `ABS Audiobooks zzz/` first (ABS doesn't watch it); once on disk, files are `mv`'d into `ABS Audiobooks/` — a same-filesystem rename that's atomic and instant.
+AudioBookShelf scans its library aggressively. Copying directly into the live library risks ABS picking up a half-copied file. The script copies each file into a sibling `<LIVE_DIR> zzz/` directory first (ABS doesn't watch it); once on disk, files are `mv`'d into the live library — a same-filesystem rename that's atomic and instant. This is why the staging dir is always a sibling of the live dir, not a separately-configurable path: the rename has to stay on one filesystem.
 
 ### Stability and resume
 
@@ -194,7 +209,7 @@ All logs share the pattern:
 
 Pull requests welcome, especially for additional child scripts (the obvious ones being ebooks and comics). Please:
 
-- Don't rename `ABS Audiobooks` / `ABS Audiobooks zzz` — those are the literal on-disk folder names AudioBookShelf expects.
+- The audiobook live directory name must match what AudioBookShelf is configured to watch — whatever you point `ABS_LIBRARY_DIR` at (or the default `ABS Audiobooks`), make sure ABS knows about it.
 - Always run with `DEBUG` first when testing against a real library root.
 - Follow the child-script contract documented above.
 - If you add a new required configuration key, document it in `scripts/.env.template` and validate its presence in the script's startup block.
