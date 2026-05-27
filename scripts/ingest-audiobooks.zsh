@@ -1,5 +1,5 @@
 #!/bin/zsh
-# jellyfin-ingest-audiobooks.zsh
+# ingest-audiobooks.zsh
 # ---------------------------------------------------------------------------
 # Audiobook ingestion child: scans <INGEST_ROOT>/ingest-audiobook for
 # Author/Book/ directories. A book directory must contain:
@@ -59,7 +59,7 @@
 # See scripts/.env.template for full documentation.
 #
 # Usage:
-#   jellyfin-ingest-audiobooks.zsh [DEBUG]
+#   ingest-audiobooks.zsh [DEBUG]
 # ---------------------------------------------------------------------------
 
 emulate -L zsh
