@@ -182,8 +182,11 @@ for dep in ffprobe python3; do
 done
 
 if [[ ! -d "$INGEST_DIR" ]]; then
-  print -u2 "FATAL: directory does not exist: $INGEST_DIR"
-  exit 66
+  if (( DEBUG )); then
+    print -- "[DEBUG] would mkdir -p: $INGEST_DIR"
+  else
+    mkdir -p -- "$INGEST_DIR"
+  fi
 fi
 
 # Parent of LIVE_DIR must exist — we'll mkdir LIVE_DIR itself, but won't
@@ -195,7 +198,7 @@ if [[ ! -d "${LIVE_DIR:h}" ]]; then
   exit 66
 fi
 
-for d in "$REJECTED_DIR" "$LIVE_DIR" "$COPY_DIR"; do
+for d in "$LIVE_DIR" "$COPY_DIR"; do
   if [[ ! -d "$d" ]]; then
     if (( DEBUG )); then
       print -- "[DEBUG] would mkdir -p: $d"
