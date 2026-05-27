@@ -1,18 +1,16 @@
-# item-injestion-manager
+# item-ingestion-manager
 
-A small, extensible zsh-based media injestion pipeline. Files dropped into local "injest" directories are validated, normalised, and moved into a media library elsewhere (often a NAS).
+A small, extensible zsh-based media ingestion pipeline. Files dropped into local "ingest" directories are validated, normalised, and moved into a media library elsewhere (often a NAS).
 
 A parent orchestrator script runs continuously and discovers per-media-type child scripts on a fixed loop. Currently shipped children target [Jellyfin](https://jellyfin.org/) (video `.m4v`) and [AudioBookShelf](https://www.audiobookshelf.org/) (audiobooks `.mp3`), but the orchestrator is media-agnostic — see [Adding a new child](#adding-a-new-child).
-
-> **A note on spelling:** the directory and script names use `injest` (not `ingest`). This is deliberate and consistent throughout the codebase — if you fork this, keep the spelling or rename everything; don't mix them.
 
 ## Contents
 
 | Script | Role |
 |---|---|
-| [`scripts/jellyfin-injest.zsh`](scripts/jellyfin-injest.zsh) | Parent orchestrator. Runs each `jellyfin-injest-*.zsh` child every 120 s. Sleeps for an hour and rechecks when the library root is unreachable (e.g. NAS off-network). |
-| [`scripts/jellyfin-injest-video.zsh`](scripts/jellyfin-injest-video.zsh) | Video child. Validates `.m4v` files (HEVC/H.265, minimum duration), classifies each as TV episode or Movie, and moves into a Jellyfin-style library layout. Conflict resolution by resolution + file size. |
-| [`scripts/jellyfin-injest-audiobooks.zsh`](scripts/jellyfin-injest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Uses a staging directory so ABS doesn't pick up half-copied files. |
+| [`scripts/jellyfin-ingest.zsh`](scripts/jellyfin-ingest.zsh) | Parent orchestrator. Runs each `jellyfin-ingest-*.zsh` child every 120 s. Sleeps for an hour and rechecks when the library root is unreachable (e.g. NAS off-network). |
+| [`scripts/jellyfin-ingest-video.zsh`](scripts/jellyfin-ingest-video.zsh) | Video child. Validates `.m4v` files (HEVC/H.265, minimum duration), classifies each as TV episode or Movie, and moves into a Jellyfin-style library layout. Conflict resolution by resolution + file size. |
+| [`scripts/jellyfin-ingest-audiobooks.zsh`](scripts/jellyfin-ingest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Uses a staging directory so ABS doesn't pick up half-copied files. |
 
 ## Requirements
 
@@ -24,10 +22,10 @@ A parent orchestrator script runs continuously and discovers per-media-type chil
 ## Quick start
 
 ```sh
-git clone https://github.com/<your-account>/item-injestion-manager.git
-cd item-injestion-manager
+git clone https://github.com/<your-account>/item-ingestion-manager.git
+cd item-ingestion-manager
 chmod +x scripts/*.zsh
-./scripts/jellyfin-injest.zsh /path/to/injest /path/to/library DEBUG
+./scripts/jellyfin-ingest.zsh /path/to/ingest /path/to/library DEBUG
 ```
 
 The `DEBUG` argument is optional. When passed, every `mkdir`, `cp`, `mv`, `rm`, and `rmdir` is logged as `[DEBUG] would …` and **not** performed. Always run with `DEBUG` first against a new library root to verify the planned operations look right.
@@ -37,18 +35,18 @@ The `DEBUG` argument is optional. When passed, every `mkdir`, `cp`, `mv`, `rm`, 
 The orchestrator takes two paths:
 
 ```
-<injest_root>         — where source files arrive (local)
+<ingest_root>         — where source files arrive (local)
 <library_root>        — where the final library lives (often a NAS mount)
 ```
 
 Children derive their own subdirectories from these:
 
 ```
-<injest_root>/
-├── injest-video/                       (video child watches this)
-├── injest-video_rejected/
-├── injest-audiobook/                   (audiobook child watches this)
-└── injest-audiobook_rejected/
+<ingest_root>/
+├── ingest-video/                       (video child watches this)
+├── ingest-video_rejected/
+├── ingest-audiobook/                   (audiobook child watches this)
+└── ingest-audiobook_rejected/
 
 <library_root>/
 ├── Movies/                             (Jellyfin)
@@ -61,25 +59,25 @@ The `zzz` suffix on the staging dir is deliberate: it sorts to the bottom in fil
 
 ## Orchestrator behaviour
 
-Run `jellyfin-injest.zsh <injest_root> <library_root> [DEBUG]` as a long-lived foreground process. Ctrl-C to stop.
+Run `jellyfin-ingest.zsh <ingest_root> <library_root> [DEBUG]` as a long-lived foreground process. Ctrl-C to stop.
 
 On each 120-second tick it:
 
 1. Verifies `<library_root>` is reachable as a directory. If not, it sleeps an hour and rechecks (intended for laptops that roam off the home network).
-2. Globs siblings matching `jellyfin-injest-*.zsh` and runs each in turn, forwarding the same `<injest_root> <library_root> [DEBUG]` arguments.
+2. Globs siblings matching `jellyfin-ingest-*.zsh` and runs each in turn, forwarding the same `<ingest_root> <library_root> [DEBUG]` arguments.
 3. A child failing logs a warning but does not abort the other children.
 
 ### Adding a new child
 
-Drop a `jellyfin-injest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orchestrator picks it up on its next loop with no config change. The contract for a child is:
+Drop a `jellyfin-ingest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orchestrator picks it up on its next loop with no config change. The contract for a child is:
 
-- Accept `<injest_root> <library_root> [DEBUG]`.
+- Accept `<ingest_root> <library_root> [DEBUG]`.
 - Be a single-run script (run once, exit).
 - Return 0 on success; non-zero is logged as a warning.
 
 ## Video child
 
-Expects `.m4v` files in `<injest_root>/injest-video/` (recursive).
+Expects `.m4v` files in `<ingest_root>/ingest-video/` (recursive).
 
 | Validation | Action on failure |
 |---|---|
@@ -99,7 +97,7 @@ Conflict resolution: higher video height wins; file size is the tiebreak.
 
 ## Audiobook child
 
-Expects strictly `Author/Book/` (depth 2) under `<injest_root>/injest-audiobook/`. Each book directory must contain `metadata.json`, `cover.jpg`, and one-or-more `.mp3` files at the book root.
+Expects strictly `Author/Book/` (depth 2) under `<ingest_root>/ingest-audiobook/`. Each book directory must contain `metadata.json`, `cover.jpg`, and one-or-more `.mp3` files at the book root.
 
 ### Validation order
 
@@ -166,7 +164,6 @@ All logs share the pattern:
 
 Pull requests welcome, especially for additional child scripts (the obvious ones being ebooks and comics). Please:
 
-- Keep the `injest` spelling — don't "fix" it to `ingest`.
 - Don't rename `ABS Audiobooks` / `ABS Audiobooks zzz` — those are the literal on-disk folder names AudioBookShelf expects.
 - Always run with `DEBUG` first when testing against a real library root.
 - Follow the child-script contract documented above.

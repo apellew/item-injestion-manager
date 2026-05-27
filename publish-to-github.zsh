@@ -13,8 +13,8 @@
 #   ./publish-to-github.zsh --go
 #
 # Optional overrides via environment variables (defaults shown):
-#   REPO_NAME=item-injestion-manager
-#   REPO_DESC="Extensible zsh-based media injestion pipeline (Jellyfin / AudioBookShelf)."
+#   REPO_NAME=item-ingestion-manager
+#   REPO_DESC="Extensible zsh-based media ingestion pipeline (Jellyfin / AudioBookShelf)."
 #   DEFAULT_BRANCH=main
 #   GH_OWNER=         # leave empty to use your default gh account
 #
@@ -39,8 +39,8 @@ emulate -L zsh
 setopt PIPE_FAIL NO_UNSET ERR_EXIT
 
 # --- config (overridable via env) ------------------------------------------
-: ${REPO_NAME:=item-injestion-manager}
-: ${REPO_DESC:=Extensible zsh-based media injestion pipeline (Jellyfin / AudioBookShelf).}
+: ${REPO_NAME:=item-ingestion-manager}
+: ${REPO_DESC:=Extensible zsh-based media ingestion pipeline (Jellyfin / AudioBookShelf).}
 : ${DEFAULT_BRANCH:=main}
 : ${GH_OWNER:=}
 
