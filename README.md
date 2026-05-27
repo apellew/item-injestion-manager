@@ -11,6 +11,7 @@ A parent orchestrator script runs continuously and discovers per-media-type chil
 | [`scripts/jellyfin-ingest.zsh`](scripts/jellyfin-ingest.zsh) | Parent orchestrator. Runs each `jellyfin-ingest-*.zsh` child every 120 s. Sleeps for an hour and rechecks when the library root is unreachable (e.g. NAS off-network). |
 | [`scripts/jellyfin-ingest-video.zsh`](scripts/jellyfin-ingest-video.zsh) | Video child. Validates `.m4v` files (HEVC/H.265, minimum duration), classifies each as TV episode or Movie, and moves into a Jellyfin-style library layout. Conflict resolution by resolution + file size. |
 | [`scripts/jellyfin-ingest-audiobooks.zsh`](scripts/jellyfin-ingest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Uses a staging directory so ABS doesn't pick up half-copied files. |
+| [`scripts/.env.template`](scripts/.env.template) | Annotated configuration template. Copy to `scripts/.env` and edit. |
 
 ## Requirements
 
@@ -25,30 +26,58 @@ A parent orchestrator script runs continuously and discovers per-media-type chil
 git clone https://github.com/<your-account>/item-ingestion-manager.git
 cd item-ingestion-manager
 chmod +x scripts/*.zsh
-./scripts/jellyfin-ingest.zsh /path/to/ingest /path/to/library DEBUG
+
+# Create your local config from the template, then fill in the two paths.
+cp scripts/.env.template scripts/.env
+$EDITOR scripts/.env
+
+# Dry-run first — see what it would do without touching any files.
+./scripts/jellyfin-ingest.zsh DEBUG
 ```
 
-The `DEBUG` argument is optional. When passed, every `mkdir`, `cp`, `mv`, `rm`, and `rmdir` is logged as `[DEBUG] would …` and **not** performed. Always run with `DEBUG` first against a new library root to verify the planned operations look right.
+`DEBUG` is an optional positional flag. When passed, every `mkdir`, `cp`, `mv`, `rm`, and `rmdir` is logged as `[DEBUG] would …` and **not** performed. Always run with `DEBUG` first against a new library root to verify the planned operations look right.
+
+Once you're happy with the dry-run output, run without the flag:
+
+```sh
+./scripts/jellyfin-ingest.zsh
+```
+
+## Configuration
+
+All runtime configuration lives in `scripts/.env`, which is gitignored. Ship a fresh checkout with no `.env` and the scripts will exit immediately with instructions to copy the template:
+
+```
+FATAL: configuration file not found at .../scripts/.env
+
+A template is shipped at .../scripts/.env.template
+Copy it and fill in your paths, then re-run this script:
+
+    cp '.../scripts/.env.template' '.../scripts/.env'
+    $EDITOR '.../scripts/.env'
+```
+
+The template documents each required key. At minimum you need:
+
+```zsh
+export INGEST_ROOT="/path/to/your/ingest"
+export LIBRARY_ROOT="/path/to/your/library"
+```
+
+Both children read the same `.env` file (sibling of the orchestrator), so configuration is shared automatically.
 
 ## Directory layout
 
-The orchestrator takes two paths:
+Children derive their working subdirectories from the two configured roots:
 
 ```
-<ingest_root>         — where source files arrive (local)
-<library_root>        — where the final library lives (often a NAS mount)
-```
-
-Children derive their own subdirectories from these:
-
-```
-<ingest_root>/
+$INGEST_ROOT/
 ├── ingest-video/                       (video child watches this)
 ├── ingest-video_rejected/
 ├── ingest-audiobook/                   (audiobook child watches this)
 └── ingest-audiobook_rejected/
 
-<library_root>/
+$LIBRARY_ROOT/
 ├── Movies/                             (Jellyfin)
 ├── TV/                                 (Jellyfin)
 ├── ABS Audiobooks/                     (AudioBookShelf live library)
@@ -59,25 +88,26 @@ The `zzz` suffix on the staging dir is deliberate: it sorts to the bottom in fil
 
 ## Orchestrator behaviour
 
-Run `jellyfin-ingest.zsh <ingest_root> <library_root> [DEBUG]` as a long-lived foreground process. Ctrl-C to stop.
+Run `jellyfin-ingest.zsh [DEBUG]` as a long-lived foreground process. Ctrl-C to stop.
 
 On each 120-second tick it:
 
-1. Verifies `<library_root>` is reachable as a directory. If not, it sleeps an hour and rechecks (intended for laptops that roam off the home network).
-2. Globs siblings matching `jellyfin-ingest-*.zsh` and runs each in turn, forwarding the same `<ingest_root> <library_root> [DEBUG]` arguments.
+1. Verifies `$LIBRARY_ROOT` is reachable as a directory. If not, it sleeps an hour and rechecks (intended for laptops that roam off the home network).
+2. Globs siblings matching `jellyfin-ingest-*.zsh` and runs each in turn, forwarding only the `DEBUG` flag if present. Children inherit `INGEST_ROOT` and `LIBRARY_ROOT` from the environment.
 3. A child failing logs a warning but does not abort the other children.
 
 ### Adding a new child
 
 Drop a `jellyfin-ingest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orchestrator picks it up on its next loop with no config change. The contract for a child is:
 
-- Accept `<ingest_root> <library_root> [DEBUG]`.
+- Accept `[DEBUG]` as the only positional argument.
+- Source `scripts/.env` at startup (so standalone testing works) and validate that `INGEST_ROOT` and `LIBRARY_ROOT` are set.
 - Be a single-run script (run once, exit).
 - Return 0 on success; non-zero is logged as a warning.
 
 ## Video child
 
-Expects `.m4v` files in `<ingest_root>/ingest-video/` (recursive).
+Expects `.m4v` files in `$INGEST_ROOT/ingest-video/` (recursive).
 
 | Validation | Action on failure |
 |---|---|
@@ -97,7 +127,7 @@ Conflict resolution: higher video height wins; file size is the tiebreak.
 
 ## Audiobook child
 
-Expects strictly `Author/Book/` (depth 2) under `<ingest_root>/ingest-audiobook/`. Each book directory must contain `metadata.json`, `cover.jpg`, and one-or-more `.mp3` files at the book root.
+Expects strictly `Author/Book/` (depth 2) under `$INGEST_ROOT/ingest-audiobook/`. Each book directory must contain `metadata.json`, `cover.jpg`, and one-or-more `.mp3` files at the book root.
 
 ### Validation order
 
@@ -108,7 +138,7 @@ Expects strictly `Author/Book/` (depth 2) under `<ingest_root>/ingest-audiobook/
 
 ### Per-mp3 conflict resolution
 
-For each `.mp3` in the source book, matched by filename against `<library_root>/ABS Audiobooks/<Author>/<Book>/`:
+For each `.mp3` in the source book, matched by filename against `$LIBRARY_ROOT/ABS Audiobooks/<Author>/<Book>/`:
 
 | Situation | Decision | Action |
 |---|---|---|
@@ -158,7 +188,7 @@ All logs share the pattern:
 
 ## Known minor issues
 
-- The orchestrator uses `local` at top level (lines 78 and 126). Works in zsh but technically invalid outside functions. Cosmetic — left alone to keep the diff history clean.
+- The orchestrator uses `local` at top level. Works in zsh but technically invalid outside functions. Cosmetic — left alone to keep the diff history clean.
 
 ## Contributing / extending
 
@@ -167,6 +197,7 @@ Pull requests welcome, especially for additional child scripts (the obvious ones
 - Don't rename `ABS Audiobooks` / `ABS Audiobooks zzz` — those are the literal on-disk folder names AudioBookShelf expects.
 - Always run with `DEBUG` first when testing against a real library root.
 - Follow the child-script contract documented above.
+- If you add a new required configuration key, document it in `scripts/.env.template` and validate its presence in the script's startup block.
 
 ## License
 

@@ -1,13 +1,17 @@
 #!/bin/zsh
 # jellyfin-ingest-video.zsh
 # ---------------------------------------------------------------------------
-# Video ingestion child: scans <ingest_root>/ingest for .m4v files, validates
-# them (H.265 + duration), classifies each as Movie or TV episode, and moves
-# into a Jellyfin-style library layout under <library_root>/Movies and
-# <library_root>/TV. Conflicts resolved by resolution (size tiebreak).
+# Video ingestion child: scans <INGEST_ROOT>/ingest-video for .m4v files,
+# validates them (H.265 + duration), classifies each as Movie or TV episode,
+# and moves into a Jellyfin-style library layout under <LIBRARY_ROOT>/Movies
+# and <LIBRARY_ROOT>/TV. Conflicts resolved by resolution (size tiebreak).
+#
+# Configuration is read from `scripts/.env` (sibling of this script). Copy
+# `scripts/.env.template` to `scripts/.env` and fill in the paths before
+# the first run.
 #
 # Called by the parent orchestrator (jellyfin-ingest.zsh) or standalone:
-#   jellyfin-ingest-video.zsh <ingest_root> <library_root> [DEBUG]
+#   jellyfin-ingest-video.zsh [DEBUG]
 # ---------------------------------------------------------------------------
 
 emulate -L zsh
@@ -17,22 +21,63 @@ setopt PIPE_FAIL NO_UNSET EXTENDED_GLOB NULL_GLOB
 export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
-# --- argument parsing -------------------------------------------------------
-if (( $# < 2 || $# > 3 )); then
-  print -u2 "Usage: $0 <ingest_root> <library_root> [DEBUG]"
-  exit 64
+# --- locate and source the config file --------------------------------------
+SCRIPT_DIR="${0:A:h}"
+CONFIG_FILE="${SCRIPT_DIR}/.env"
+TEMPLATE_FILE="${SCRIPT_DIR}/.env.template"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  print -u2 ""
+  print -u2 "FATAL: configuration file not found at $CONFIG_FILE"
+  print -u2 ""
+  if [[ -f "$TEMPLATE_FILE" ]]; then
+    print -u2 "A template is shipped at $TEMPLATE_FILE"
+    print -u2 "Copy it and fill in your paths, then re-run this script:"
+    print -u2 ""
+    print -u2 "    cp '$TEMPLATE_FILE' '$CONFIG_FILE'"
+    print -u2 "    \$EDITOR '$CONFIG_FILE'"
+  else
+    print -u2 "Create $CONFIG_FILE with at least the following content:"
+    print -u2 ""
+    print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
+    print -u2 "    export LIBRARY_ROOT=\"/path/to/your/library\""
+  fi
+  print -u2 ""
+  exit 78  # EX_CONFIG
 fi
 
-INGEST_ROOT="${1:A}"
-LIBRARY_ROOT="${2:A}"
+source "$CONFIG_FILE"
+
+typeset -a _missing
+for _var in INGEST_ROOT LIBRARY_ROOT; do
+  if [[ -z "${(P)_var:-}" ]]; then
+    _missing+=( "$_var" )
+  fi
+done
+if (( ${#_missing[@]} > 0 )); then
+  print -u2 "FATAL: required configuration key(s) not set in $CONFIG_FILE:"
+  for _v in "${_missing[@]}"; do print -u2 "  - $_v"; done
+  print -u2 ""
+  print -u2 "See $TEMPLATE_FILE for documentation."
+  exit 78
+fi
+unset _missing _var _v
+
+INGEST_ROOT="${INGEST_ROOT:A}"
+LIBRARY_ROOT="${LIBRARY_ROOT:A}"
+
+# --- argument parsing -------------------------------------------------------
 DEBUG=0
-if (( $# == 3 )); then
-  if [[ "${3:u}" == "DEBUG" ]]; then
+if (( $# == 1 )); then
+  if [[ "${1:u}" == "DEBUG" ]]; then
     DEBUG=1
   else
-    print -u2 "Third arg must be 'DEBUG' if present (got: $3)"
+    print -u2 "Usage: $0 [DEBUG]"
     exit 64
   fi
+elif (( $# > 1 )); then
+  print -u2 "Usage: $0 [DEBUG]"
+  exit 64
 fi
 
 INGEST_DIR="${INGEST_ROOT}/ingest-video"

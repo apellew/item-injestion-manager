@@ -24,3 +24,6 @@
 # Local / private notes that shouldn't ship
 NOTES.local.md
 TODO.local.md
+
+# Per-machine configuration — ships only as scripts/.env.template
+scripts/.env
