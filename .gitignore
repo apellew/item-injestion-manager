@@ -27,3 +27,6 @@ TODO.local.md
 
 # Per-machine configuration — ships only as scripts/.env.template
 scripts/.env
+
+# Output of git-issues-refresh.sh — issue snapshots are per-user noise.
+git-issues/
