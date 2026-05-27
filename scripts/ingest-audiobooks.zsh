@@ -1,14 +1,14 @@
 #!/bin/zsh
 # ingest-audiobooks.zsh
 # ---------------------------------------------------------------------------
-# Audiobook ingestion child: scans <INGEST_ROOT>/ingest-audiobook for
+# Audiobook ingestion child: scans <INGEST_ROOT>/ingest-audiobooks for
 # Author/Book/ directories. A book directory must contain:
 #     metadata.json + cover.jpg + one-or-more .mp3 files (at the root)
 # Single-file and multi-file books are both supported.
 #
 # Configuration is read from `scripts/.env` (sibling of this script). Copy
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before
-# the first run.
+# the first run. Shared helpers are sourced from `scripts/_lib.zsh`.
 #
 # Required .env keys: INGEST_ROOT, ABS_LIBRARY_DIR. All paths are absolute;
 # no fallbacks or derived defaults.
@@ -50,12 +50,12 @@
 #   lower_quality   – incoming file/book lost the comparison
 #
 # Layout expected:
-#   <INGEST_ROOT>/ingest-audiobook/<Author>/<Book>/{*.mp3, cover.jpg, metadata.json}
+#   <INGEST_ROOT>/ingest-audiobooks/<Author>/<Book>/{*.mp3, cover.jpg, metadata.json}
 #
 # Output:
 #   <ABS_LIBRARY_DIR>/<Author>/<Book>/...        (live library)
 #   <ABS_LIBRARY_DIR> zzz/<Author>/<Book>/...    (staging — sibling of LIVE_DIR)
-#   <INGEST_ROOT>/ingest-audiobook_rejected/<category>/<Author>/<Book>/*
+#   <INGEST_ROOT>/ingest-audiobooks_rejected/<category>/<Author>/<Book>/*
 #
 # Usage:
 #   ingest-audiobooks.zsh [DEBUG]
@@ -72,6 +72,7 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 SCRIPT_DIR="${0:A:h}"
 CONFIG_FILE="${SCRIPT_DIR}/.env"
 TEMPLATE_FILE="${SCRIPT_DIR}/.env.template"
+LIB_FILE="${SCRIPT_DIR}/_lib.zsh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   print -u2 ""
@@ -113,6 +114,13 @@ unset _missing _var _v
 INGEST_ROOT="${INGEST_ROOT:A}"
 ABS_LIBRARY_DIR="${ABS_LIBRARY_DIR:A}"
 
+# --- load shared helpers ---------------------------------------------------
+if [[ ! -f "$LIB_FILE" ]]; then
+  print -u2 "FATAL: shared helper library not found: $LIB_FILE"
+  exit 70  # EX_SOFTWARE
+fi
+source "$LIB_FILE"
+
 # --- argument parsing -------------------------------------------------------
 DEBUG=0
 if (( $# == 1 )); then
@@ -127,8 +135,8 @@ elif (( $# > 1 )); then
   exit 64
 fi
 
-INGEST_DIR="${INGEST_ROOT}/ingest-audiobook"
-REJECTED_DIR="${INGEST_ROOT}/ingest-audiobook_rejected"
+INGEST_DIR="${INGEST_ROOT}/ingest-audiobooks"
+REJECTED_DIR="${INGEST_ROOT}/ingest-audiobooks_rejected"
 # Audiobook library is whatever ABS_LIBRARY_DIR points at (required).
 LIVE_DIR="$ABS_LIBRARY_DIR"
 # Staging dir is always a sibling of LIVE_DIR with a " zzz" suffix —
@@ -142,7 +150,6 @@ typeset -aU NON_MP3_AUDIO_EXTS=( m4a m4b mp4 flac wav ogg oga aac wma opus alac 
 typeset -aU REQUIRED_BOOK_FILES=( metadata.json cover.jpg )
 
 DURATION_TOLERANCE_PCT=5        # max duration delta to allow a replace
-STABILITY_SLEEP_SECONDS=3       # gap between size samples for mid-copy check
 MIN_FILE_AGE_SECONDS=30         # don't touch anything fresher than this
 EMPTY_DIR_MIN_AGE_MIN=60        # 1 hour: cleanup of empty dirs
 
@@ -200,69 +207,9 @@ log "  live       = $LIVE_DIR"
 log "  staging    = $COPY_DIR"
 log "  debug mode = $DEBUG"
 
-zmodload -F zsh/stat b:zstat 2>/dev/null || true
-
-# --- helpers ----------------------------------------------------------------
-
-file_size() {
-  local f="$1" s
-  s="$(zstat -L +size -- "$f" 2>/dev/null)" || s=""
-  if [[ -z "$s" ]]; then
-    s="$(stat -f %z -- "$f" 2>/dev/null)" || s=""
-  fi
-  print -- "${s:-0}"
-}
-
-file_age_seconds() {
-  local f="$1" mt now
-  mt="$(zstat -L +mtime -- "$f" 2>/dev/null)" || mt=""
-  if [[ -z "$mt" ]]; then
-    mt="$(stat -f %m -- "$f" 2>/dev/null)" || mt="0"
-  fi
-  now="$(date +%s)"
-  print -- $(( now - mt ))
-}
-
-# Returns 0 if mid-copy, 1 if stable.
-is_file_in_use() {
-  local f="$1"
-  IN_USE_REASON=""
-
-  local ext="${f:e:l}"
-  case "$ext" in
-    part|crdownload|download|!ut|tmp|partial)
-      IN_USE_REASON="has temp-file extension (.$ext)"
-      return 0
-      ;;
-  esac
-  local sibling
-  for sibling in "${f}.part" "${f}.crdownload" "${f}.!ut" "${f}.download" "${f}.tmp"; do
-    if [[ -e "$sibling" ]]; then
-      IN_USE_REASON="sibling temp file exists: ${sibling:t}"
-      return 0
-    fi
-  done
-
-  if command -v lsof >/dev/null 2>&1; then
-    local lsof_out
-    lsof_out="$(lsof -Fft -- "$f" 2>/dev/null || true)"
-    if print -r -- "$lsof_out" | awk '/^f.*[wu]$/{ found=1 } END{ exit !found }'; then
-      IN_USE_REASON="open for write by another process (lsof)"
-      return 0
-    fi
-  fi
-
-  local s1 s2
-  s1="$(file_size "$f")"
-  sleep "$STABILITY_SLEEP_SECONDS"
-  s2="$(file_size "$f")"
-  if [[ "$s1" != "$s2" ]]; then
-    IN_USE_REASON="size changed during ${STABILITY_SLEEP_SECONDS}s sample ($s1 -> $s2 bytes)"
-    return 0
-  fi
-
-  return 1
-}
+# --- audiobook-specific helpers --------------------------------------------
+# (Generic helpers — file_size, file_age_seconds, is_file_in_use,
+# ffprobe_value, ffprobe_duration — are provided by _lib.zsh.)
 
 # Author dir name has 2+ consecutive single-uppercase tokens? (J K Rowling)
 author_has_bad_initials() {
@@ -295,15 +242,6 @@ ffprobe_bitrate() {
   fi
   [[ "$br" == "N/A" ]] && br=""
   print -- "${br:-0}"
-}
-
-# Duration in seconds (may be a float). Echoes "" on failure.
-ffprobe_duration() {
-  local f="$1" d
-  d="$(ffprobe -v error -show_entries format=duration \
-       -of default=noprint_wrappers=1:nokey=1 -- "$f" 2>/dev/null)"
-  [[ "$d" == "N/A" ]] && d=""
-  print -- "$d"
 }
 
 # Compare two audio files (both must exist). Sets globals:

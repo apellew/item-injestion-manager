@@ -2,15 +2,17 @@
 
 A small, extensible zsh-based media ingestion pipeline. Files dropped into local "ingest" directories are validated, normalised, and moved into a media library elsewhere (often a NAS).
 
-A parent orchestrator script runs continuously and discovers per-media-type child scripts on a fixed loop. Currently shipped children target [Jellyfin](https://jellyfin.org/) (video `.m4v`) and [AudioBookShelf](https://www.audiobookshelf.org/) (audiobooks `.mp3`), but the orchestrator is media-agnostic — see [Adding a new child](#adding-a-new-child).
+A parent orchestrator script runs continuously and discovers per-media-type child scripts on a fixed loop. Currently shipped children target [Jellyfin](https://jellyfin.org/) (TV `.m4v`, Movie `.m4v`) and [AudioBookShelf](https://www.audiobookshelf.org/) (audiobooks `.mp3`), but the orchestrator is media-agnostic — see [Adding a new child](#adding-a-new-child).
 
 ## Contents
 
 | Script | Role |
 |---|---|
 | [`scripts/ingest.zsh`](scripts/ingest.zsh) | Parent orchestrator. Runs each `ingest-*.zsh` child every 120 s. If `LIBRARY_ROOT` is set in .env, waits when the directory is unreachable (e.g. NAS off-network); otherwise skips that probe. |
-| [`scripts/ingest-video.zsh`](scripts/ingest-video.zsh) | Video child. Validates `.m4v` files (HEVC/H.265, minimum duration), classifies each as TV episode or Movie, and moves into `JELLYFIN_TV_DIR` or `JELLYFIN_MOVIES_DIR`. Conflict resolution by resolution + file size. |
+| [`scripts/ingest-tv.zsh`](scripts/ingest-tv.zsh) | TV episode child. Validates `.m4v` files (HEVC/H.265, minimum duration), parses TV episode patterns, and writes to `JELLYFIN_TV_DIR`. Year is required in the filename. |
+| [`scripts/ingest-movie.zsh`](scripts/ingest-movie.zsh) | Movie child. Validates `.m4v` files, parses movie title + optional year, and writes to `JELLYFIN_MOVIES_DIR`. |
 | [`scripts/ingest-audiobooks.zsh`](scripts/ingest-audiobooks.zsh) | Audiobook child for AudioBookShelf. Per-mp3 quality comparison via `ffprobe` with coupled metadata refresh. Writes to `ABS_LIBRARY_DIR`. Uses a sibling staging directory so ABS doesn't pick up half-copied files. |
+| [`scripts/_lib.zsh`](scripts/_lib.zsh) | Shared helper library sourced by every child. Provides file-stat helpers, `ffprobe` wrappers, mid-copy detection, and the video-quality `compare_files` used by both TV and Movie. Not invoked directly — leading underscore keeps the orchestrator's `ingest-*.zsh` glob from picking it up. |
 | [`scripts/.env.template`](scripts/.env.template) | Annotated configuration template. Copy to `scripts/.env` and edit. |
 
 ## Requirements
@@ -66,8 +68,8 @@ All values are full absolute paths. No fallbacks, no derived defaults.
 | Key | Required by | Purpose |
 |---|---|---|
 | `INGEST_ROOT` | every script | Root of the local "ingest" directory tree. Each child watches a subdirectory under this. |
-| `JELLYFIN_MOVIES_DIR` | `ingest-video.zsh` | Where movies land. |
-| `JELLYFIN_TV_DIR` | `ingest-video.zsh` | Where TV episodes land. |
+| `JELLYFIN_MOVIES_DIR` | `ingest-movie.zsh` | Where movies land. |
+| `JELLYFIN_TV_DIR` | `ingest-tv.zsh` | Where TV episodes land. |
 | `ABS_LIBRARY_DIR` | `ingest-audiobooks.zsh` | The AudioBookShelf live library directory itself (NOT a parent). The staging directory is derived as a sibling with a ` zzz` suffix. |
 
 ### Optional convenience: `LIBRARY_ROOT`
@@ -85,14 +87,16 @@ Users with libraries on different volumes can leave `LIBRARY_ROOT` unset and wri
 
 ## Directory layout
 
-Each script watches its own ingest subdirectory and writes to its own configured library directory:
+Each script watches its own ingest subdirectory (named to match the script) and writes to its own configured library directory:
 
 ```
 $INGEST_ROOT/
-├── ingest-video/                       (video child watches this)
-├── ingest-video_rejected/
-├── ingest-audiobook/                   (audiobook child watches this)
-└── ingest-audiobook_rejected/
+├── ingest-tv/                          (ingest-tv.zsh watches this)
+├── ingest-tv_rejected/
+├── ingest-movie/                       (ingest-movie.zsh watches this)
+├── ingest-movie_rejected/
+├── ingest-audiobooks/                  (ingest-audiobooks.zsh watches this)
+└── ingest-audiobooks_rejected/
 ```
 
 Library destinations are each configured independently — they can live on the same volume as each other or different ones. A typical "everything on one NAS" layout might look like:
@@ -129,15 +133,17 @@ On each 120-second tick it:
 
 Drop an `ingest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orchestrator picks it up on its next loop with no config change. The contract for a child is:
 
-- The filename must match `ingest-*.zsh` (the dash after `ingest` is load-bearing — it's what prevents the orchestrator from matching its own glob and recursively running itself).
+- The filename must match `ingest-*.zsh` (the dash after `ingest` is load-bearing — it's what prevents the orchestrator from matching its own glob and recursively running itself, and it's also what excludes `_lib.zsh`).
+- By convention, the child's input directory under `$INGEST_ROOT` shares its name (so `ingest-foo.zsh` watches `ingest-foo/`, rejects into `ingest-foo_rejected/`).
 - Accept `[DEBUG]` as the only positional argument.
 - Source `scripts/.env` at startup (so standalone testing works) and validate that its own required keys are set.
+- Source `scripts/_lib.zsh` for the shared helpers (`file_size`, `file_age_seconds`, `is_file_in_use`, `ffprobe_value`, `ffprobe_duration`, `compare_files`).
 - Be a single-run script (run once, exit).
 - Return 0 on success; non-zero is logged as a warning.
 
-## Video child
+## TV child
 
-Expects `.m4v` files in `$INGEST_ROOT/ingest-video/` (recursive).
+Expects `.m4v` files in `$INGEST_ROOT/ingest-tv/` (recursive).
 
 | Validation | Action on failure |
 |---|---|
@@ -146,18 +152,46 @@ Expects `.m4v` files in `$INGEST_ROOT/ingest-video/` (recursive).
 | Duration < 120 s | `corrupt` rejection (likely stub) |
 | Zero-byte for > 24 h | `corrupt` rejection |
 | `ffprobe` can't read for > 24 h | `corrupt` rejection |
-| Filename doesn't parse | `parse_error` rejection |
+| Filename doesn't parse a TV pattern WITH a year | `parse_error` rejection |
 
-Classification heuristics:
+Filename patterns recognised:
 
-- **TV episode** if the filename contains `SxxEyy` or `NxNN` (case-insensitive). Year is parsed from `(YYYY)` in the filename, or inferred by fuzzy-matching the show name against existing `JELLYFIN_TV_DIR` subdirectories.
-- **Movie** otherwise. Year optional.
+- `Show Name (YYYY) SxxEyy.m4v` — year in parens (preferred).
+- `Show Name YYYY SxxEyy.m4v` — year as trailing word.
+- `Show Name (YYYY) NxNN.m4v` — `N x NN` season/episode form.
+
+Year is **required** in the filename. The previous library-lookup-fuzzy-match for missing years has been removed — everything is filename-driven now. If your source file lacks a year, rename it before dropping.
+
+Destination layout: `${JELLYFIN_TV_DIR}/Show (Year)/Season NN/Show (Year) - SNNEMM.m4v`.
+
+Conflict resolution: higher video height wins; file size is the tiebreak.
+
+## Movie child
+
+Expects `.m4v` files in `$INGEST_ROOT/ingest-movie/` (recursive).
+
+| Validation | Action on failure |
+|---|---|
+| Not an `.m4v` | `wrong_type` rejection (or auto-delete for `.jpg/.png/.log/.nfo`) |
+| Codec not HEVC / H.265 | `wrong_codec` rejection |
+| Duration < 120 s | `corrupt` rejection (likely stub) |
+| Zero-byte for > 24 h | `corrupt` rejection |
+| `ffprobe` can't read for > 24 h | `corrupt` rejection |
+| Filename has no parseable title | `parse_error` rejection |
+
+Filename patterns recognised:
+
+- `Title (YYYY).m4v` — year in parens (preferred).
+- `Title YYYY.m4v` — year as trailing word.
+- `Title.m4v` — no year; folder is just `Title` (no year suffix).
+
+Destination layout: `${JELLYFIN_MOVIES_DIR}/Title (Year)/Title (Year).m4v` (or `${JELLYFIN_MOVIES_DIR}/Title/Title.m4v` if no year).
 
 Conflict resolution: higher video height wins; file size is the tiebreak.
 
 ## Audiobook child
 
-Expects strictly `Author/Book/` (depth 2) under `$INGEST_ROOT/ingest-audiobook/`. Each book directory must contain `metadata.json`, `cover.jpg`, and one-or-more `.mp3` files at the book root.
+Expects strictly `Author/Book/` (depth 2) under `$INGEST_ROOT/ingest-audiobooks/`. Each book directory must contain `metadata.json`, `cover.jpg`, and one-or-more `.mp3` files at the book root.
 
 ### Validation order
 
@@ -193,14 +227,14 @@ AudioBookShelf scans its library aggressively. Copying directly into the live li
 - Before touching a book, every file the script intends to write is checked for mid-copy state (temp extension, sibling `.part` file, `lsof` write handle, size changing across a 3-second sample, or mtime younger than 30 s). If any fails, the whole book is deferred to the next loop.
 - Partially-staged files from a previous run are reused if their size matches the source. Size mismatch → re-copy.
 
-## Reject categories (both children)
+## Reject categories (all children)
 
 | Category | Meaning |
 |---|---|
 | `wrong_type` | File type doesn't match the child's contract |
 | `wrong_codec` | Video only — file isn't HEVC/H.265 |
 | `corrupt` | Unreadable by ffprobe, zero-byte stale, bad duration |
-| `parse_error` | Couldn't determine show/movie, missing required files, bad author name |
+| `parse_error` | Couldn't parse filename, missing required files, bad author name |
 | `lower_quality` | Lost a quality comparison vs an existing library file |
 | `replaced` | An existing library file was bumped out by a higher-quality incoming file |
 
@@ -214,7 +248,7 @@ All logs share the pattern:
 [YYYY-MM-DD HH:MM:SS] [<child>] <message>
 ```
 
-`DEBUG` output is prefixed `[DEBUG]`.
+Children identify themselves with short prefixes: `[tv]`, `[movie]`, `[audiobooks]`. `DEBUG` output is prefixed `[DEBUG]`.
 
 ## Known minor issues
 
@@ -227,6 +261,7 @@ Pull requests welcome, especially for additional child scripts (the obvious ones
 - The audiobook live directory name must match what AudioBookShelf is configured to watch — whatever you point `ABS_LIBRARY_DIR` at, make sure ABS knows about it.
 - Always run with `DEBUG` first when testing against a real library root.
 - Follow the child-script contract documented above.
+- Use the helpers in `scripts/_lib.zsh` rather than re-implementing file stats / ffprobe wrappers in each new child.
 - If you add a new required configuration key, document it in `scripts/.env.template` and validate its presence in the script's startup block.
 
 ## License
