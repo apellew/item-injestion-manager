@@ -2,21 +2,26 @@
 # ingest-movie.zsh
 # ---------------------------------------------------------------------------
 # Movie ingestion child: scans <INGEST_ROOT>/ingest-movie for .m4v files,
-# validates them (H.265 + duration), parses movie title + year from the
-# filename, and moves them into a Jellyfin-style library layout under
-# JELLYFIN_MOVIES_DIR/Title (Year)/Title (Year).m4v. Conflicts resolved
-# by resolution (size tiebreak).
+# validates them (H.265 + duration), parses each filename via a user-defined
+# regex (JELLYFIN_MOVIE_PARSE_REGEX), and constructs the destination path
+# via a user-defined template (JELLYFIN_MOVIE_NAME_TEMPLATE). Conflicts
+# resolved by resolution (size tiebreak).
 #
 # Configuration is read from `scripts/.env` (sibling of this script). Copy
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before
-# the first run. Shared helpers are sourced from `scripts/_lib.zsh`.
+# the first run. Shared helpers are sourced from `scripts/_lib.zsh`;
+# regex parsing is performed by `scripts/_parse_name.py` via python3.
 #
-# Required .env keys: INGEST_ROOT, JELLYFIN_MOVIES_DIR.
+# Required .env keys:
+#   INGEST_ROOT, JELLYFIN_MOVIES_DIR,
+#   JELLYFIN_MOVIE_PARSE_REGEX, JELLYFIN_MOVIE_NAME_TEMPLATE.
 #
-# Filename patterns recognised:
-#   - "Title (YYYY).m4v"           — year in parens (preferred)
-#   - "Title YYYY.m4v"             — year as trailing word
-#   - "Title.m4v" (no year)        — accepted; folder is "Title" (no year)
+# Filename → destination flow:
+#   1. Source file: <INGEST_ROOT>/ingest-movie/SOME_REL_PATH.m4v
+#   2. Stripped:    SOME_REL_PATH (extension dropped)
+#   3. Regex match against the stripped string. No match → parse_error.
+#   4. Template expansion (%NAME% replaced with captured values).
+#   5. Destination: <JELLYFIN_MOVIES_DIR>/<expanded>.m4v
 #
 # Called by the parent orchestrator (ingest.zsh) or standalone:
 #   ingest-movie.zsh [DEBUG]
@@ -34,6 +39,7 @@ SCRIPT_DIR="${0:A:h}"
 CONFIG_FILE="${SCRIPT_DIR}/.env"
 TEMPLATE_FILE="${SCRIPT_DIR}/.env.template"
 LIB_FILE="${SCRIPT_DIR}/_lib.zsh"
+PARSE_HELPER="${SCRIPT_DIR}/_parse_name.py"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   print -u2 ""
@@ -50,15 +56,17 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     print -u2 ""
     print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
     print -u2 "    export JELLYFIN_MOVIES_DIR=\"/path/to/your/jellyfin/Movies\""
+    print -u2 "    export JELLYFIN_MOVIE_PARSE_REGEX='...'"
+    print -u2 "    export JELLYFIN_MOVIE_NAME_TEMPLATE='...'"
   fi
   print -u2 ""
-  exit 78  # EX_CONFIG
+  exit 78
 fi
 
 source "$CONFIG_FILE"
 
 typeset -a _missing
-for _var in INGEST_ROOT JELLYFIN_MOVIES_DIR; do
+for _var in INGEST_ROOT JELLYFIN_MOVIES_DIR JELLYFIN_MOVIE_PARSE_REGEX JELLYFIN_MOVIE_NAME_TEMPLATE; do
   if [[ -z "${(P)_var:-}" ]]; then
     _missing+=( "$_var" )
   fi
@@ -81,6 +89,11 @@ if [[ ! -f "$LIB_FILE" ]]; then
   exit 70
 fi
 source "$LIB_FILE"
+
+if [[ ! -f "$PARSE_HELPER" ]]; then
+  print -u2 "FATAL: regex helper not found: $PARSE_HELPER"
+  exit 70
+fi
 
 # --- argument parsing -------------------------------------------------------
 DEBUG=0
@@ -106,7 +119,7 @@ MIN_FILE_AGE_SECONDS=30
 STALE_REJECT_AGE_SECONDS=86400
 
 # --- preflight --------------------------------------------------------------
-for dep in ffprobe; do
+for dep in ffprobe python3; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     print -u2 "FATAL: required dependency '$dep' not found in PATH"
     print -u2 "PATH=$PATH"
@@ -147,7 +160,6 @@ typeset -i DELETED_COUNT=0
 
 skip()  { (( SKIPPED_COUNT += 1 )); log "SKIP $*"; }
 
-# Extensions to auto-delete from the ingest tree (lowercase, no dot).
 typeset -aU AUTO_DELETE_EXTS=( jpg png log nfo )
 
 log "starting"
@@ -158,13 +170,6 @@ log "  debug mode = $DEBUG"
 
 # --- script-local helpers --------------------------------------------------
 
-# Reject categories used as subdirectory names under REJECTED_DIR:
-#   lower_quality    – lost a conflict comparison against an existing file
-#   wrong_type       – not an .m4v file
-#   wrong_codec      – m4v but not HEVC/H.265
-#   corrupt          – unreadable by ffprobe, zero-byte stale, bad duration
-#   parse_error      – could not parse a movie title from the filename
-#   replaced         – existing file bumped out by higher-quality incoming file
 reject_file() {
   local src="$1" category="$2" reason="$3"
   local base="${src:t}"
@@ -213,34 +218,6 @@ install_file() {
     mkdir -p -- "${dest:h}"
     mv -- "$src" "$dest"
   fi
-}
-
-# Parse movie title + year from filename stem.
-# Sets: MOVIE_TITLE, MOVIE_YEAR (may be empty).
-parse_movie() {
-  local stem="$1"
-  MOVIE_TITLE=""; MOVIE_YEAR=""
-
-  local normalised="${stem//[._]/ }"
-
-  local title="" year=""
-  if [[ "$normalised" =~ '\(((19|20)[0-9]{2})\)' ]]; then
-    year="${match[1]}"
-    title="${normalised%%\(${year}\)*}"
-  elif [[ "$normalised" =~ '[[:space:]]((19|20)[0-9]{2})([[:space:]]|$)' ]]; then
-    year="${match[1]}"
-    title="${normalised% ${year}*}"
-  else
-    title="$normalised"
-  fi
-
-  title="${title%%[[:space:]]##}"
-  title="${title##[[:space:]]##}"
-  title="${title%%[[:space:]]#-[[:space:]]#}"
-  title="${title//[[:space:]][[:space:]]##/ }"
-
-  MOVIE_TITLE="$title"
-  MOVIE_YEAR="$year"
 }
 
 # --- main processing --------------------------------------------------------
@@ -337,24 +314,19 @@ for file in "${candidates[@]}"; do
     continue
   fi
 
-  # --- classify: Movie -----------------------------------------------------
-  local stem="${file:t:r}"
+  # --- classify: regex + template -----------------------------------------
+  local source_rel="${file#${INGEST_DIR}/}"
+  source_rel="${source_rel:r}"
 
-  parse_movie "$stem"
-  if [[ -z "$MOVIE_TITLE" ]]; then
-    reject_file "$file" "parse_error" "could not parse a movie title from filename"
+  local dest_rel
+  if ! dest_rel="$(python3 "$PARSE_HELPER" "$JELLYFIN_MOVIE_PARSE_REGEX" "$JELLYFIN_MOVIE_NAME_TEMPLATE" "$source_rel" 2>/dev/null)"; then
+    reject_file "$file" "parse_error" "JELLYFIN_MOVIE_PARSE_REGEX did not match: '$source_rel'"
     continue
   fi
 
-  local folder
-  if [[ -n "$MOVIE_YEAR" ]]; then
-    folder="${MOVIE_TITLE} (${MOVIE_YEAR})"
-  else
-    folder="${MOVIE_TITLE}"
-  fi
-  local dest="${MOVIES_DIR}/${folder}/${folder}.m4v"
-  log "classified as Movie: title='$MOVIE_TITLE' year='${MOVIE_YEAR:-none}'"
+  log "parsed: '$source_rel' -> '$dest_rel'"
 
+  local dest="${MOVIES_DIR}/${dest_rel}.m4v"
   debug "proposed destination: $dest"
 
   # --- conflict resolution --------------------------------------------------

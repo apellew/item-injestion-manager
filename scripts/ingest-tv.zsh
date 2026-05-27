@@ -2,26 +2,26 @@
 # ingest-tv.zsh
 # ---------------------------------------------------------------------------
 # TV episode ingestion child: scans <INGEST_ROOT>/ingest-tv for .m4v files,
-# validates them (H.265 + duration), parses TV episode patterns from the
-# filename, and moves them into a Jellyfin-style library layout under
-# JELLYFIN_TV_DIR/Show (Year)/Season NN/Show (Year) - SNNEMM.m4v.
-# Conflicts resolved by resolution (size tiebreak).
+# validates them (H.265 + duration), parses each filename via a user-defined
+# regex (JELLYFIN_TV_PARSE_REGEX), and constructs the destination path via
+# a user-defined template (JELLYFIN_TV_NAME_TEMPLATE). Conflicts resolved
+# by resolution (size tiebreak).
 #
 # Configuration is read from `scripts/.env` (sibling of this script). Copy
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before
-# the first run. Shared helpers are sourced from `scripts/_lib.zsh`.
+# the first run. Shared helpers are sourced from `scripts/_lib.zsh`;
+# regex parsing is performed by `scripts/_parse_name.py` via python3.
 #
-# Required .env keys: INGEST_ROOT, JELLYFIN_TV_DIR.
+# Required .env keys:
+#   INGEST_ROOT, JELLYFIN_TV_DIR,
+#   JELLYFIN_TV_PARSE_REGEX, JELLYFIN_TV_NAME_TEMPLATE.
 #
-# Filename patterns recognised:
-#   - "Show Name (YYYY) SxxEyy ...m4v"   — year in parens, S/E
-#   - "Show Name YYYY SxxEyy ...m4v"     — year as trailing word, S/E
-#   - "Show Name SxxEyy ...m4v"          — no year; REJECTED (no auto-infer)
-#   - "Show Name (YYYY) NxNN ...m4v"     — N x NN season/episode form
-#
-# Year is REQUIRED in the filename (or the file rejects via parse_error).
-# The previous library-lookup-fuzzy-match for missing years was removed —
-# everything is filename-driven now, no library introspection.
+# Filename → destination flow:
+#   1. Source file: <INGEST_ROOT>/ingest-tv/SOME_REL_PATH.m4v
+#   2. Stripped:    SOME_REL_PATH (extension dropped)
+#   3. Regex match against the stripped string. No match → parse_error.
+#   4. Template expansion (%NAME% replaced with captured values).
+#   5. Destination: <JELLYFIN_TV_DIR>/<expanded>.m4v
 #
 # Called by the parent orchestrator (ingest.zsh) or standalone:
 #   ingest-tv.zsh [DEBUG]
@@ -39,6 +39,7 @@ SCRIPT_DIR="${0:A:h}"
 CONFIG_FILE="${SCRIPT_DIR}/.env"
 TEMPLATE_FILE="${SCRIPT_DIR}/.env.template"
 LIB_FILE="${SCRIPT_DIR}/_lib.zsh"
+PARSE_HELPER="${SCRIPT_DIR}/_parse_name.py"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   print -u2 ""
@@ -55,6 +56,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     print -u2 ""
     print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
     print -u2 "    export JELLYFIN_TV_DIR=\"/path/to/your/jellyfin/TV\""
+    print -u2 "    export JELLYFIN_TV_PARSE_REGEX='...'"
+    print -u2 "    export JELLYFIN_TV_NAME_TEMPLATE='...'"
   fi
   print -u2 ""
   exit 78  # EX_CONFIG
@@ -63,7 +66,7 @@ fi
 source "$CONFIG_FILE"
 
 typeset -a _missing
-for _var in INGEST_ROOT JELLYFIN_TV_DIR; do
+for _var in INGEST_ROOT JELLYFIN_TV_DIR JELLYFIN_TV_PARSE_REGEX JELLYFIN_TV_NAME_TEMPLATE; do
   if [[ -z "${(P)_var:-}" ]]; then
     _missing+=( "$_var" )
   fi
@@ -87,6 +90,11 @@ if [[ ! -f "$LIB_FILE" ]]; then
 fi
 source "$LIB_FILE"
 
+if [[ ! -f "$PARSE_HELPER" ]]; then
+  print -u2 "FATAL: regex helper not found: $PARSE_HELPER"
+  exit 70
+fi
+
 # --- argument parsing -------------------------------------------------------
 DEBUG=0
 if (( $# == 1 )); then
@@ -105,13 +113,13 @@ INGEST_DIR="${INGEST_ROOT}/ingest-tv"
 REJECTED_DIR="${INGEST_ROOT}/ingest-tv_rejected"
 TV_DIR="$JELLYFIN_TV_DIR"
 
-MIN_DURATION_SECONDS=120        # 2 minutes (content validation)
-EMPTY_DIR_MIN_AGE_MIN=60        # 1 hour
-MIN_FILE_AGE_SECONDS=30         # don't touch anything whose mtime is fresher than this
-STALE_REJECT_AGE_SECONDS=86400  # 24h: after this, an unreadable file is deemed corrupt
+MIN_DURATION_SECONDS=120
+EMPTY_DIR_MIN_AGE_MIN=60
+MIN_FILE_AGE_SECONDS=30
+STALE_REJECT_AGE_SECONDS=86400
 
 # --- preflight --------------------------------------------------------------
-for dep in ffprobe; do
+for dep in ffprobe python3; do
   if ! command -v "$dep" >/dev/null 2>&1; then
     print -u2 "FATAL: required dependency '$dep' not found in PATH"
     print -u2 "PATH=$PATH"
@@ -130,7 +138,6 @@ if [[ ! -d "${TV_DIR:h}" ]]; then
   exit 66
 fi
 
-# Ensure writable output scaffolding exists.
 for d in "$REJECTED_DIR" "$TV_DIR"; do
   if [[ ! -d "$d" ]]; then
     if (( DEBUG )); then
@@ -153,7 +160,6 @@ typeset -i DELETED_COUNT=0
 
 skip()  { (( SKIPPED_COUNT += 1 )); log "SKIP $*"; }
 
-# Extensions to auto-delete from the ingest tree (lowercase, no dot).
 typeset -aU AUTO_DELETE_EXTS=( jpg png log nfo )
 
 log "starting"
@@ -164,16 +170,6 @@ log "  debug mode = $DEBUG"
 
 # --- script-local helpers --------------------------------------------------
 
-# Reject a file: move to ingest-tv_rejected/<category> with a .log
-# explaining why.
-#
-# Categories (used as subdirectory names under REJECTED_DIR):
-#   lower_quality    – lost a conflict comparison against an existing file
-#   wrong_type       – not an .m4v file
-#   wrong_codec      – m4v but not HEVC/H.265
-#   corrupt          – unreadable by ffprobe, zero-byte stale, bad duration
-#   parse_error      – could not parse a TV episode from the filename
-#   replaced         – existing file bumped out by higher-quality incoming file
 reject_file() {
   local src="$1" category="$2" reason="$3"
   local base="${src:t}"
@@ -200,7 +196,6 @@ reject_file() {
   fi
 }
 
-# Delete a companion/cruft file outright (no rejection, no log file).
 delete_file() {
   local src="$1" reason="$2"
   (( DELETED_COUNT += 1 ))
@@ -212,7 +207,6 @@ delete_file() {
   fi
 }
 
-# Move a file to its Jellyfin destination.
 install_file() {
   local src="$1" dest="$2"
   (( COPIED_COUNT += 1 ))
@@ -224,54 +218,6 @@ install_file() {
     mkdir -p -- "${dest:h}"
     mv -- "$src" "$dest"
   fi
-}
-
-# Parse TV episode info from a filename stem. Year is REQUIRED — if the
-# filename doesn't contain a year, parsing fails.
-#
-# Sets: TV_SHOW, TV_YEAR, TV_SEASON, TV_EPISODE.
-# Returns 0 on success, 1 otherwise.
-parse_tv() {
-  local stem="$1"
-  TV_SHOW=""; TV_YEAR=""; TV_SEASON=""; TV_EPISODE=""
-
-  local normalised="${stem//[._]/ }"
-  local prefix=""
-
-  if [[ "$normalised" =~ '(.*[^[:space:]])[[:space:]]+[Ss]([0-9]{1,2})[Ee]([0-9]{1,3})' ]]; then
-    prefix="${match[1]}"
-    TV_SEASON="${match[2]}"
-    TV_EPISODE="${match[3]}"
-  elif [[ "$normalised" =~ '(.*[^[:space:]])[[:space:]]+([0-9]{1,2})x([0-9]{1,3})([^0-9]|$)' ]]; then
-    prefix="${match[1]}"
-    TV_SEASON="${match[2]}"
-    TV_EPISODE="${match[3]}"
-  else
-    return 1
-  fi
-
-  if [[ "$prefix" =~ '\(((19|20)[0-9]{2})\)' ]]; then
-    TV_YEAR="${match[1]}"
-    TV_SHOW="${prefix%%\(${TV_YEAR}\)*}"
-  elif [[ "$prefix" =~ '[[:space:]]((19|20)[0-9]{2})([[:space:]]|$)' ]]; then
-    TV_YEAR="${match[1]}"
-    TV_SHOW="${prefix% ${TV_YEAR}*}"
-  else
-    # Year is required — no fallback library lookup.
-    return 1
-  fi
-
-  TV_SHOW="${TV_SHOW%%[[:space:]]##}"
-  TV_SHOW="${TV_SHOW##[[:space:]]##}"
-  TV_SHOW="${TV_SHOW%%[[:space:]]#-[[:space:]]#}"
-  TV_SHOW="${TV_SHOW%%[[:space:]]##}"
-  TV_SHOW="${TV_SHOW//[[:space:]][[:space:]]##/ }"
-
-  TV_SEASON="$(printf '%02d' "$TV_SEASON")"
-  TV_EPISODE="$(printf '%02d' "$TV_EPISODE")"
-
-  [[ -n "$TV_SHOW" ]] || return 1
-  return 0
 }
 
 # --- main processing --------------------------------------------------------
@@ -368,20 +314,20 @@ for file in "${candidates[@]}"; do
     continue
   fi
 
-  # --- classify: TV episode -------------------------------------------------
-  local stem="${file:t:r}"
-  local tv_rc=0
-  parse_tv "$stem" || tv_rc=$?
-  if (( tv_rc != 0 )); then
-    reject_file "$file" "parse_error" "could not parse TV episode pattern from filename (year required: 'Show (YYYY) SxxEyy' or 'Show YYYY SxxEyy')"
+  # --- classify: regex + template -----------------------------------------
+  # Strip the ingest dir prefix and the .m4v extension before regex match.
+  local source_rel="${file#${INGEST_DIR}/}"
+  source_rel="${source_rel:r}"
+
+  local dest_rel
+  if ! dest_rel="$(python3 "$PARSE_HELPER" "$JELLYFIN_TV_PARSE_REGEX" "$JELLYFIN_TV_NAME_TEMPLATE" "$source_rel" 2>/dev/null)"; then
+    reject_file "$file" "parse_error" "JELLYFIN_TV_PARSE_REGEX did not match: '$source_rel'"
     continue
   fi
 
-  log "parsed TV: show='$TV_SHOW' year=$TV_YEAR season=$TV_SEASON episode=$TV_EPISODE"
+  log "parsed: '$source_rel' -> '$dest_rel'"
 
-  local show_folder="${TV_SHOW} (${TV_YEAR})"
-  local dest="${TV_DIR}/${show_folder}/Season ${TV_SEASON}/${show_folder} - S${TV_SEASON}E${TV_EPISODE}.m4v"
-
+  local dest="${TV_DIR}/${dest_rel}.m4v"
   debug "proposed destination: $dest"
 
   # --- conflict resolution --------------------------------------------------
