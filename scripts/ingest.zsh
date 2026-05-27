@@ -9,8 +9,8 @@
 # first run. The template documents each required key.
 #
 # The orchestrator itself only requires INGEST_ROOT in .env. Each child
-# script validates its own additional required keys (JELLYFIN_MOVIES_DIR /
-# JELLYFIN_TV_DIR for the video child, ABS_LIBRARY_DIR for the audiobook
+# script validates its own additional required keys (MOVIES_DIR /
+# TV_DIR for the video child, AUDIOBOOKS_DIR for the audiobook
 # child, etc.) when it starts.
 #
 # Optional: if LIBRARY_ROOT is set in .env, the orchestrator uses it as a

@@ -3,9 +3,11 @@
 # ---------------------------------------------------------------------------
 # TV episode ingestion child: scans <INGEST_ROOT>/ingest-tv for .m4v files,
 # validates them (H.265 + duration), parses each filename via a user-defined
-# regex (JELLYFIN_TV_PARSE_REGEX), and constructs the destination path via
-# a user-defined template (JELLYFIN_TV_NAME_TEMPLATE). Conflicts resolved
-# by resolution (size tiebreak).
+# regex (TV_PARSE_REGEX), and constructs the destination path via a
+# user-defined template (TV_NAME_TEMPLATE). Installation uses a staged
+# copy-then-rename so any downstream media server that watches the live
+# library doesn't pick up a half-copied file. Conflicts resolved by
+# resolution (size tiebreak).
 #
 # Configuration is read from `scripts/.env` (sibling of this script). Copy
 # `scripts/.env.template` to `scripts/.env` and fill in the paths before
@@ -13,15 +15,17 @@
 # regex parsing is performed by `scripts/_parse_name.py` via python3.
 #
 # Required .env keys:
-#   INGEST_ROOT, JELLYFIN_TV_DIR,
-#   JELLYFIN_TV_PARSE_REGEX, JELLYFIN_TV_NAME_TEMPLATE.
+#   INGEST_ROOT, TV_DIR,
+#   TV_PARSE_REGEX, TV_NAME_TEMPLATE.
 #
 # Filename → destination flow:
 #   1. Source file: <INGEST_ROOT>/ingest-tv/SOME_REL_PATH.m4v
 #   2. Stripped:    SOME_REL_PATH (extension dropped)
 #   3. Regex match against the stripped string. No match → parse_error.
 #   4. Template expansion (%NAME% replaced with captured values).
-#   5. Destination: <JELLYFIN_TV_DIR>/<expanded>.m4v
+#   5. Stage: cp source -> <TV_DIR> zzz/<expanded>.m4v
+#   6. Merge: atomic mv into <TV_DIR>/<expanded>.m4v
+#   7. Remove source.
 #
 # Called by the parent orchestrator (ingest.zsh) or standalone:
 #   ingest-tv.zsh [DEBUG]
@@ -55,9 +59,9 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     print -u2 "Create $CONFIG_FILE with at least the following content:"
     print -u2 ""
     print -u2 "    export INGEST_ROOT=\"/path/to/your/ingest\""
-    print -u2 "    export JELLYFIN_TV_DIR=\"/path/to/your/jellyfin/TV\""
-    print -u2 "    export JELLYFIN_TV_PARSE_REGEX='...'"
-    print -u2 "    export JELLYFIN_TV_NAME_TEMPLATE='...'"
+    print -u2 "    export TV_DIR=\"/path/to/your/tv\""
+    print -u2 "    export TV_PARSE_REGEX='...'"
+    print -u2 "    export TV_NAME_TEMPLATE='...'"
   fi
   print -u2 ""
   exit 78  # EX_CONFIG
@@ -66,7 +70,7 @@ fi
 source "$CONFIG_FILE"
 
 typeset -a _missing
-for _var in INGEST_ROOT JELLYFIN_TV_DIR JELLYFIN_TV_PARSE_REGEX JELLYFIN_TV_NAME_TEMPLATE; do
+for _var in INGEST_ROOT TV_DIR TV_PARSE_REGEX TV_NAME_TEMPLATE; do
   if [[ -z "${(P)_var:-}" ]]; then
     _missing+=( "$_var" )
   fi
@@ -81,7 +85,7 @@ fi
 unset _missing _var _v
 
 INGEST_ROOT="${INGEST_ROOT:A}"
-JELLYFIN_TV_DIR="${JELLYFIN_TV_DIR:A}"
+TV_DIR="${TV_DIR:A}"
 
 # --- load shared helpers ---------------------------------------------------
 if [[ ! -f "$LIB_FILE" ]]; then
@@ -111,7 +115,9 @@ fi
 
 INGEST_DIR="${INGEST_ROOT}/ingest-tv"
 REJECTED_DIR="${INGEST_ROOT}/ingest-tv_rejected"
-TV_DIR="$JELLYFIN_TV_DIR"
+# Staging dir for the cp-then-mv install pattern. Sibling of TV_DIR so
+# the final mv is a same-filesystem atomic rename, not a slow cp+rm.
+COPY_DIR="${TV_DIR%/} zzz"
 
 MIN_DURATION_SECONDS=120
 EMPTY_DIR_MIN_AGE_MIN=60
@@ -136,12 +142,12 @@ if [[ ! -d "$INGEST_DIR" ]]; then
 fi
 
 if [[ ! -d "${TV_DIR:h}" ]]; then
-  print -u2 "FATAL: parent directory of JELLYFIN_TV_DIR does not exist: ${TV_DIR:h}"
-  print -u2 "       (JELLYFIN_TV_DIR=$TV_DIR)"
+  print -u2 "FATAL: parent directory of TV_DIR does not exist: ${TV_DIR:h}"
+  print -u2 "       (TV_DIR=$TV_DIR)"
   exit 66
 fi
 
-for d in "$TV_DIR"; do
+for d in "$TV_DIR" "$COPY_DIR"; do
   if [[ ! -d "$d" ]]; then
     if (( DEBUG )); then
       print -- "[DEBUG] would mkdir -p: $d"
@@ -169,6 +175,7 @@ log "starting"
 log "  ingest     = $INGEST_DIR"
 log "  rejected   = $REJECTED_DIR"
 log "  tv         = $TV_DIR"
+log "  staging    = $COPY_DIR"
 log "  debug mode = $DEBUG"
 
 # --- script-local helpers --------------------------------------------------
@@ -210,17 +217,28 @@ delete_file() {
   fi
 }
 
+# Install src into dest via the stage-then-merge pattern provided by
+# _lib.zsh. The source file is removed after the install succeeds.
 install_file() {
   local src="$1" dest="$2"
-  (( COPIED_COUNT += 1 ))
+  local label="${dest#${TV_DIR}/}"   # relative under TV_DIR, for log clarity
+  local stage="${COPY_DIR}/${label}"
   log "INSTALL: $src -> $dest"
-  if (( DEBUG )); then
-    print -- "[DEBUG] would mkdir -p: ${dest:h}"
-    print -- "[DEBUG] would move: $src -> $dest"
-  else
-    mkdir -p -- "${dest:h}"
-    mv -- "$src" "$dest"
+  if ! stage_file "$src" "$stage" "$label"; then
+    log "ERROR: stage failed: $src -> $stage"
+    return 1
   fi
+  if ! merge_file "$stage" "$dest" "$label"; then
+    log "ERROR: merge failed: $stage -> $dest"
+    return 1
+  fi
+  if (( DEBUG )); then
+    print -- "[DEBUG] would rm: $src"
+  else
+    rm -f -- "$src"
+  fi
+  (( COPIED_COUNT += 1 ))
+  return 0
 }
 
 # --- main processing --------------------------------------------------------
@@ -318,13 +336,12 @@ for file in "${candidates[@]}"; do
   fi
 
   # --- classify: regex + template -----------------------------------------
-  # Strip the ingest dir prefix and the .m4v extension before regex match.
   local source_rel="${file#${INGEST_DIR}/}"
   source_rel="${source_rel:r}"
 
   local dest_rel
-  if ! dest_rel="$(python3 "$PARSE_HELPER" "$JELLYFIN_TV_PARSE_REGEX" "$JELLYFIN_TV_NAME_TEMPLATE" "$source_rel" 2>/dev/null)"; then
-    reject_file "$file" "parse_error" "JELLYFIN_TV_PARSE_REGEX did not match: '$source_rel'"
+  if ! dest_rel="$(python3 "$PARSE_HELPER" "$TV_PARSE_REGEX" "$TV_NAME_TEMPLATE" "$source_rel" 2>/dev/null)"; then
+    reject_file "$file" "parse_error" "TV_PARSE_REGEX did not match: '$source_rel'"
     continue
   fi
 
@@ -364,6 +381,11 @@ if command -v find >/dev/null 2>&1; then
         rmdir -- "$emptydir" 2>/dev/null && log "removed empty dir: $emptydir"
       fi
     done
+fi
+
+# Clean empty staging subtree (left over after merges).
+if (( ! DEBUG )); then
+  find "$COPY_DIR" -depth -type d -empty -delete 2>/dev/null
 fi
 
 log "---"

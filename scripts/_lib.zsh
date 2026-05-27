@@ -9,9 +9,14 @@
 #
 # Conventions:
 #   - Functions here MUST be side-effect-free apart from setting their
-#     documented globals (e.g. IN_USE_REASON).
+#     documented globals (e.g. IN_USE_REASON) and writing to stdout
+#     via the caller-provided log()/debug() functions.
 #   - Functions MUST work under `setopt NO_UNSET` — use `${var:-}` for
 #     anything that might be missing.
+#   - Functions DO NOT bump caller-side counters (COPIED_COUNT etc.) —
+#     callers do that themselves based on the return value.
+#   - Functions assume the caller has defined `log()` and `debug()`
+#     and `DEBUG` as appropriate.
 #   - Constants exported here are picked up by each child via sourcing.
 # ---------------------------------------------------------------------------
 
@@ -144,4 +149,93 @@ compare_files() {
   else
     print existing
   fi
+}
+
+# --- staged install pattern -----------------------------------------------
+# These two helpers implement the "copy to staging, then atomically move
+# to live" pattern. The staging directory must be on the same filesystem
+# as the live destination so the final mv is a true rename, not a slow
+# cp+rm. Children that use this pattern derive their staging dir as a
+# sibling of the live dir with a " zzz" suffix.
+#
+# The pattern protects against media servers that auto-watch the live
+# library — those tools never see a half-copied file because the file
+# only appears in the live dir as a complete unit.
+#
+# Both helpers are DEBUG-aware (logging "would …" lines and skipping
+# actual filesystem writes) and assume the caller has defined log() and
+# debug() and DEBUG.
+# --------------------------------------------------------------------------
+
+# Copy a source file to a staging path with size verification.
+# Returns 0 on success (real or dry-run), 1 on failure.
+# Resume-aware: if the staging path already exists and its size matches
+# the source, no copy is performed.
+stage_file() {
+  local src="$1" dst="$2" rel_label="$3"
+
+  if [[ -e "$dst" ]]; then
+    local src_sz="$(file_size "$src")"
+    local dst_sz="$(file_size "$dst")"
+    if [[ "$src_sz" == "$dst_sz" ]]; then
+      debug "staged from prior run (size matches): $rel_label"
+      return 0
+    fi
+    log "  staging size mismatch ($dst_sz vs $src_sz), recopying: $rel_label"
+    if (( DEBUG )); then
+      print -- "[DEBUG] would rm partial: $dst"
+    else
+      rm -f -- "$dst"
+    fi
+  fi
+
+  log "  COPY: $rel_label"
+  if (( DEBUG )); then
+    print -- "[DEBUG] would mkdir -p: ${dst:h}"
+    print -- "[DEBUG] would cp: $src -> $dst"
+    return 0
+  fi
+
+  mkdir -p -- "${dst:h}"
+  if ! cp -- "$src" "$dst"; then
+    log "ERROR: copy failed: $src -> $dst"
+    rm -f -- "$dst"
+    return 1
+  fi
+  local src_sz="$(file_size "$src")"
+  local dst_sz="$(file_size "$dst")"
+  if [[ "$src_sz" != "$dst_sz" ]]; then
+    log "ERROR: post-copy size mismatch ($dst_sz != $src_sz): $dst"
+    rm -f -- "$dst"
+    return 1
+  fi
+  return 0
+}
+
+# Move a staged file into its live destination. Refuses to overwrite an
+# existing live file (the caller is expected to have displaced the
+# previous live version via a rejection-replace first).
+# Returns 0 on success, 1 on failure.
+merge_file() {
+  local staged="$1" live="$2" rel_label="$3"
+
+  if (( DEBUG )); then
+    print -- "[DEBUG] would mkdir -p: ${live:h}"
+    print -- "[DEBUG] would mv: $staged -> $live"
+    return 0
+  fi
+
+  if [[ ! -e "$staged" ]]; then
+    log "  ERROR: staged file missing at merge time: $staged"
+    return 1
+  fi
+  if [[ -e "$live" ]]; then
+    log "  WARN: live already has file, leaving in staging: $rel_label"
+    return 1
+  fi
+
+  mkdir -p -- "${live:h}"
+  log "  MERGE: $rel_label"
+  mv -- "$staged" "$live"
+  return 0
 }
