@@ -1,7 +1,7 @@
 #!/bin/zsh
-# jellyfin-injest.zsh
+# jellyfin-ingest.zsh
 # ---------------------------------------------------------------------------
-# Parent orchestrator: discovers and runs jellyfin-injest-*.zsh child scripts,
+# Parent orchestrator: discovers and runs jellyfin-ingest-*.zsh child scripts,
 # then waits and repeats. Exit with Ctrl-C.
 #
 # Each child script handles a specific media type (video, books, audiobooks,
@@ -9,14 +9,14 @@
 # library subfolders internally.
 #
 # Usage:
-#   jellyfin-injest.zsh <injest_root> <library_root> [DEBUG]
+#   jellyfin-ingest.zsh <ingest_root> <library_root> [DEBUG]
 #
 # Example:
-#   jellyfin-injest.zsh /Volumes/Media /Volumes/Jellyfin DEBUG
+#   jellyfin-ingest.zsh /Volumes/Media /Volumes/Jellyfin DEBUG
 #
 # Child script contract:
-#   - Named jellyfin-injest-<type>.zsh in the same directory as this script.
-#   - Called with: <injest_root> <library_root> [DEBUG]
+#   - Named jellyfin-ingest-<type>.zsh in the same directory as this script.
+#   - Called with: <ingest_root> <library_root> [DEBUG]
 #   - Must be a single-run script (run once, then exit).
 #   - Exit code 0 = success. Non-zero = logged as a warning but does not
 #     stop other children from running.
@@ -31,11 +31,11 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 # --- argument parsing -------------------------------------------------------
 if (( $# < 2 || $# > 3 )); then
-  print -u2 "Usage: $0 <injest_root> <library_root> [DEBUG]"
+  print -u2 "Usage: $0 <ingest_root> <library_root> [DEBUG]"
   exit 64
 fi
 
-INJEST_ROOT="${1:A}"
+INGEST_ROOT="${1:A}"
 LIBRARY_ROOT="${2:A}"
 DEBUG_ARG=""
 if (( $# == 3 )); then
@@ -51,7 +51,7 @@ LOOP_SLEEP_SECONDS=120
 UNAVAILABLE_CHECK_SECONDS=3600  # 1 hour: how long to wait when library root is unavailable
 
 # --- locate child scripts ---------------------------------------------------
-# Children live alongside this script and match jellyfin-injest-*.zsh.
+# Children live alongside this script and match jellyfin-ingest-*.zsh.
 SCRIPT_DIR="${0:A:h}"
 
 log() { print -- "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
@@ -59,9 +59,9 @@ log() { print -- "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 # Graceful exit on Ctrl-C.
 trap 'print ""; log "interrupted — exiting"; exit 0' INT
 
-log "jellyfin-injest orchestrator starting (Ctrl-C to stop)"
+log "jellyfin-ingest orchestrator starting (Ctrl-C to stop)"
 log "  script dir   = $SCRIPT_DIR"
-log "  injest root  = $INJEST_ROOT"
+log "  ingest root  = $INGEST_ROOT"
 log "  library root = $LIBRARY_ROOT"
 log "  debug        = ${DEBUG_ARG:-off}"
 log "  loop sleep   = ${LOOP_SLEEP_SECONDS}s"
@@ -89,10 +89,10 @@ while true; do
   log "========================================"
 
   typeset -a children
-  children=( "$SCRIPT_DIR"/jellyfin-injest-*.zsh(.N) )
+  children=( "$SCRIPT_DIR"/jellyfin-ingest-*.zsh(.N) )
 
   if (( ${#children[@]} == 0 )); then
-    log "WARNING: no child scripts found matching $SCRIPT_DIR/jellyfin-injest-*.zsh"
+    log "WARNING: no child scripts found matching $SCRIPT_DIR/jellyfin-ingest-*.zsh"
   else
     log "found ${#children[@]} child script(s)"
   fi
@@ -108,9 +108,9 @@ while true; do
 
     local rc=0
     if [[ -n "$DEBUG_ARG" ]]; then
-      "$child" "$INJEST_ROOT" "$LIBRARY_ROOT" "$DEBUG_ARG" || rc=$?
+      "$child" "$INGEST_ROOT" "$LIBRARY_ROOT" "$DEBUG_ARG" || rc=$?
     else
-      "$child" "$INJEST_ROOT" "$LIBRARY_ROOT" || rc=$?
+      "$child" "$INGEST_ROOT" "$LIBRARY_ROOT" || rc=$?
     fi
 
     if (( rc != 0 )); then

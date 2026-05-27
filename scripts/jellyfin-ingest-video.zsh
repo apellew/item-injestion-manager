@@ -1,13 +1,13 @@
 #!/bin/zsh
-# jellyfin-injest-video.zsh
+# jellyfin-ingest-video.zsh
 # ---------------------------------------------------------------------------
-# Video injestion child: scans <injest_root>/injest for .m4v files, validates
+# Video ingestion child: scans <ingest_root>/ingest for .m4v files, validates
 # them (H.265 + duration), classifies each as Movie or TV episode, and moves
 # into a Jellyfin-style library layout under <library_root>/Movies and
 # <library_root>/TV. Conflicts resolved by resolution (size tiebreak).
 #
-# Called by the parent orchestrator (jellyfin-injest.zsh) or standalone:
-#   jellyfin-injest-video.zsh <injest_root> <library_root> [DEBUG]
+# Called by the parent orchestrator (jellyfin-ingest.zsh) or standalone:
+#   jellyfin-ingest-video.zsh <ingest_root> <library_root> [DEBUG]
 # ---------------------------------------------------------------------------
 
 emulate -L zsh
@@ -19,11 +19,11 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 # --- argument parsing -------------------------------------------------------
 if (( $# < 2 || $# > 3 )); then
-  print -u2 "Usage: $0 <injest_root> <library_root> [DEBUG]"
+  print -u2 "Usage: $0 <ingest_root> <library_root> [DEBUG]"
   exit 64
 fi
 
-INJEST_ROOT="${1:A}"
+INGEST_ROOT="${1:A}"
 LIBRARY_ROOT="${2:A}"
 DEBUG=0
 if (( $# == 3 )); then
@@ -35,8 +35,8 @@ if (( $# == 3 )); then
   fi
 fi
 
-INJEST_DIR="${INJEST_ROOT}/injest-video"
-REJECTED_DIR="${INJEST_ROOT}/injest-video_rejected"
+INGEST_DIR="${INGEST_ROOT}/ingest-video"
+REJECTED_DIR="${INGEST_ROOT}/ingest-video_rejected"
 MOVIES_DIR="${LIBRARY_ROOT}/Movies"
 TV_DIR="${LIBRARY_ROOT}/TV"
 
@@ -55,7 +55,7 @@ for dep in ffprobe; do
   fi
 done
 
-for d in "$INJEST_DIR" "$LIBRARY_ROOT"; do
+for d in "$INGEST_DIR" "$LIBRARY_ROOT"; do
   if [[ ! -d "$d" ]]; then
     print -u2 "FATAL: directory does not exist: $d"
     exit 66
@@ -85,11 +85,11 @@ typeset -i DELETED_COUNT=0
 
 skip()  { (( SKIPPED_COUNT += 1 )); log "SKIP $*"; }
 
-# Extensions to auto-delete from the injest tree (lowercase, no dot).
+# Extensions to auto-delete from the ingest tree (lowercase, no dot).
 typeset -aU AUTO_DELETE_EXTS=( jpg png log nfo )
 
 log "starting"
-log "  injest     = $INJEST_DIR"
+log "  ingest     = $INGEST_DIR"
 log "  rejected   = $REJECTED_DIR"
 log "  movies     = $MOVIES_DIR"
 log "  tv         = $TV_DIR"
@@ -113,9 +113,9 @@ ffprobe_duration() {
     -- "$file" 2>/dev/null
 }
 
-# Reject a file: move to injest_rejected/<category> with a .log explaining why.
+# Reject a file: move to ingest_rejected/<category> with a .log explaining why.
 #
-# Categories (used as subdirectory names under injest_rejected):
+# Categories (used as subdirectory names under ingest_rejected):
 #   lower_quality    – lost a conflict comparison against an existing file
 #   wrong_type       – not an .m4v file
 #   wrong_codec      – m4v but not HEVC/H.265
@@ -414,7 +414,7 @@ zmodload -F zsh/stat b:zstat 2>/dev/null || true
 
 # First pass: handle non-m4v files.
 typeset -a strays
-strays=( "$INJEST_DIR"/**/*(.N) )
+strays=( "$INGEST_DIR"/**/*(.N) )
 for f in "${strays[@]}"; do
   local ext="${f:e:l}"
   if [[ "$ext" == "m4v" ]]; then
@@ -433,7 +433,7 @@ done
 
 # Find candidate m4v files (case-insensitive), recursive.
 typeset -a candidates
-candidates=( "$INJEST_DIR"/**/*.(#i)m4v(.N) )
+candidates=( "$INGEST_DIR"/**/*.(#i)m4v(.N) )
 
 log "found ${#candidates[@]} candidate file(s)"
 
@@ -563,12 +563,12 @@ for file in "${candidates[@]}"; do
   fi
 done
 
-# --- cleanup: remove empty folders in injest older than 1h ------------------
+# --- cleanup: remove empty folders in ingest older than 1h ------------------
 log "---"
 log "cleaning empty directories older than ${EMPTY_DIR_MIN_AGE_MIN} minutes"
 
 if command -v find >/dev/null 2>&1; then
-  find "$INJEST_DIR" -mindepth 1 -depth -type d -empty -mmin +${EMPTY_DIR_MIN_AGE_MIN} -print 2>/dev/null | \
+  find "$INGEST_DIR" -mindepth 1 -depth -type d -empty -mmin +${EMPTY_DIR_MIN_AGE_MIN} -print 2>/dev/null | \
     while IFS= read -r emptydir; do
       if (( DEBUG )); then
         print -- "[DEBUG] would rmdir: $emptydir"

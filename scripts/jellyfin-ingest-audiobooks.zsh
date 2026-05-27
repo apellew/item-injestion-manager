@@ -1,7 +1,7 @@
 #!/bin/zsh
-# jellyfin-injest-audiobooks.zsh
+# jellyfin-ingest-audiobooks.zsh
 # ---------------------------------------------------------------------------
-# Audiobook injestion child: scans <injest_root>/injest-audiobook for
+# Audiobook ingestion child: scans <ingest_root>/ingest-audiobook for
 # Author/Book/ directories. A book directory must contain:
 #     metadata.json + cover.jpg + one-or-more .mp3 files (at the root)
 # Single-file and multi-file books are both supported.
@@ -42,15 +42,15 @@
 #   lower_quality   – incoming file/book lost the comparison
 #
 # Layout expected:
-#   <injest_root>/injest-audiobook/<Author>/<Book>/{*.mp3, cover.jpg, metadata.json}
+#   <ingest_root>/ingest-audiobook/<Author>/<Book>/{*.mp3, cover.jpg, metadata.json}
 #
 # Output:
 #   <library_root>/ABS Audiobooks/<Author>/<Book>/...        (live)
 #   <library_root>/ABS Audiobooks zzz/<Author>/<Book>/...    (staging)
-#   <injest_root>/injest-audiobook_rejected/<category>/<Author>/<Book>/*
+#   <ingest_root>/ingest-audiobook_rejected/<category>/<Author>/<Book>/*
 #
 # Usage:
-#   jellyfin-injest-audiobooks.zsh <injest_root> <library_root> [DEBUG]
+#   jellyfin-ingest-audiobooks.zsh <ingest_root> <library_root> [DEBUG]
 # ---------------------------------------------------------------------------
 
 emulate -L zsh
@@ -62,11 +62,11 @@ export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
 # --- argument parsing -------------------------------------------------------
 if (( $# < 2 || $# > 3 )); then
-  print -u2 "Usage: $0 <injest_root> <library_root> [DEBUG]"
+  print -u2 "Usage: $0 <ingest_root> <library_root> [DEBUG]"
   exit 64
 fi
 
-INJEST_ROOT="${1:A}"
+INGEST_ROOT="${1:A}"
 LIBRARY_ROOT="${2:A}"
 DEBUG=0
 if (( $# == 3 )); then
@@ -78,8 +78,8 @@ if (( $# == 3 )); then
   fi
 fi
 
-INJEST_DIR="${INJEST_ROOT}/injest-audiobook"
-REJECTED_DIR="${INJEST_ROOT}/injest-audiobook_rejected"
+INGEST_DIR="${INGEST_ROOT}/ingest-audiobook"
+REJECTED_DIR="${INGEST_ROOT}/ingest-audiobook_rejected"
 LIVE_DIR="${LIBRARY_ROOT}/ABS Audiobooks"
 COPY_DIR="${LIBRARY_ROOT}/ABS Audiobooks zzz"
 
@@ -103,7 +103,7 @@ for dep in ffprobe; do
   fi
 done
 
-for d in "$INJEST_DIR" "$LIBRARY_ROOT"; do
+for d in "$INGEST_DIR" "$LIBRARY_ROOT"; do
   if [[ ! -d "$d" ]]; then
     print -u2 "FATAL: directory does not exist: $d"
     exit 66
@@ -135,7 +135,7 @@ typeset -i BOOKS_PROCESSED=0
 skip() { (( SKIPPED_COUNT += 1 )); log "SKIP $*"; }
 
 log "starting"
-log "  source     = $INJEST_DIR"
+log "  source     = $INGEST_DIR"
 log "  rejected   = $REJECTED_DIR"
 log "  live       = $LIVE_DIR"
 log "  staging    = $COPY_DIR"
@@ -358,7 +358,7 @@ reject_file() {
 # Used for whole-book rejections (validation failures, all-mp3s-lost).
 reject_book() {
   local src_book="$1" category="$2" reason="$3" extra="${4:-}"
-  local rel="${src_book#${INJEST_DIR}/}"   # Author/Book
+  local rel="${src_book#${INGEST_DIR}/}"   # Author/Book
   local dest="${REJECTED_DIR}/${category}/${rel}"
 
   (( REJECTED_COUNT += 1 ))
@@ -487,18 +487,18 @@ install_or_replace() {
 # --- main processing --------------------------------------------------------
 
 typeset -a books
-books=( "$INJEST_DIR"/*/*(/N) )
+books=( "$INGEST_DIR"/*/*(/N) )
 
 log "found ${#books[@]} book directory(ies)"
 
 typeset -a stray_top
-stray_top=( "$INJEST_DIR"/*(.N) )
+stray_top=( "$INGEST_DIR"/*(.N) )
 if (( ${#stray_top[@]} > 0 )); then
-  log "WARNING: ${#stray_top[@]} loose file(s) at top of $INJEST_DIR (expected Author/Book/file structure):"
+  log "WARNING: ${#stray_top[@]} loose file(s) at top of $INGEST_DIR (expected Author/Book/file structure):"
   for sf in "${stray_top[@]}"; do log "  - $sf"; done
 fi
 typeset -a stray_author
-stray_author=( "$INJEST_DIR"/*/*(.N) )
+stray_author=( "$INGEST_DIR"/*/*(.N) )
 if (( ${#stray_author[@]} > 0 )); then
   log "WARNING: ${#stray_author[@]} loose file(s) at Author level (expected Author/Book/file):"
   for sf in "${stray_author[@]}"; do log "  - $sf"; done
@@ -508,7 +508,7 @@ for book_dir in "${books[@]}"; do
   log "---"
   log "processing: $book_dir"
 
-  local rel="${book_dir#${INJEST_DIR}/}"   # Author/Book
+  local rel="${book_dir#${INGEST_DIR}/}"   # Author/Book
   local author="${rel%%/*}"
 
   typeset -a book_files
@@ -788,7 +788,7 @@ log "---"
 log "cleaning empty directories older than ${EMPTY_DIR_MIN_AGE_MIN} minutes"
 
 if command -v find >/dev/null 2>&1; then
-  find "$INJEST_DIR" -mindepth 1 -depth -type d -empty -mmin +${EMPTY_DIR_MIN_AGE_MIN} -print 2>/dev/null | \
+  find "$INGEST_DIR" -mindepth 1 -depth -type d -empty -mmin +${EMPTY_DIR_MIN_AGE_MIN} -print 2>/dev/null | \
     while IFS= read -r emptydir; do
       if (( DEBUG )); then
         print -- "[DEBUG] would rmdir: $emptydir"
