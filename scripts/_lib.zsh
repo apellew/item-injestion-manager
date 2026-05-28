@@ -151,6 +151,68 @@ compare_files() {
   fi
 }
 
+# Format a byte count as a human-readable size (e.g. "2.4 GiB").
+# Echoes "?" for empty, missing, or non-numeric input.
+human_size() {
+  local b="${1:-}"
+  if ! [[ "$b" =~ '^[0-9]+$' ]]; then
+    print -- "?"
+    return
+  fi
+  if   (( b >= 1073741824 )); then printf '%.1f GiB' "$(( b / 1073741824.0 ))"
+  elif (( b >= 1048576    )); then printf '%.1f MiB' "$(( b / 1048576.0 ))"
+  elif (( b >= 1024       )); then printf '%.1f KiB' "$(( b / 1024.0 ))"
+  else                              printf '%d B' "$b"
+  fi
+}
+
+# Format a duration in seconds (may be a float) as HH:MM:SS.
+# Echoes "?" for empty or non-numeric input.
+human_duration() {
+  local d="${1:-}"
+  d="${d%%.*}"
+  if ! [[ "$d" =~ '^[0-9]+$' ]]; then
+    print -- "?"
+    return
+  fi
+  printf '%02d:%02d:%02d' $(( d / 3600 )) $(( (d % 3600) / 60 )) $(( d % 60 ))
+}
+
+# Log a side-by-side comparison table for two video files (existing vs
+# incoming). Used by the TV and Movie children after a duplicate-verdict
+# log line, so the log makes it obvious why one file beat the other.
+# Probes resolution (WxH), duration (HH:MM:SS), and file size for each
+# file. Missing or unreadable values render as "?".
+# Uses the caller's log() function for prefix/timestamp consistency.
+log_compare_table() {
+  local existing="$1" incoming="$2"
+  local ew eh ed es iw ih id is
+  ew="$(ffprobe_value width  "$existing")"; ew="${ew:-?}"
+  eh="$(ffprobe_value height "$existing")"; eh="${eh:-?}"
+  ed="$(ffprobe_duration     "$existing")"
+  es="$(file_size            "$existing")"
+  iw="$(ffprobe_value width  "$incoming")"; iw="${iw:-?}"
+  ih="$(ffprobe_value height "$incoming")"; ih="${ih:-?}"
+  id="$(ffprobe_duration     "$incoming")"
+  is="$(file_size            "$incoming")"
+
+  local e_res i_res
+  if [[ "$ew" == "?" || "$eh" == "?" ]]; then e_res="?"; else e_res="${ew}x${eh}"; fi
+  if [[ "$iw" == "?" || "$ih" == "?" ]]; then i_res="?"; else i_res="${iw}x${ih}"; fi
+
+  local e_dur i_dur e_sz i_sz
+  e_dur="$(human_duration "$ed")"
+  i_dur="$(human_duration "$id")"
+  e_sz="$(human_size "$es")"
+  i_sz="$(human_size "$is")"
+
+  log "  comparison:"
+  log "$(printf '    %-12s %-18s %s' 'attribute'  'existing' 'incoming')"
+  log "$(printf '    %-12s %-18s %s' 'resolution' "$e_res"   "$i_res")"
+  log "$(printf '    %-12s %-18s %s' 'duration'   "$e_dur"   "$i_dur")"
+  log "$(printf '    %-12s %-18s %s' 'size'       "$e_sz"    "$i_sz")"
+}
+
 # --- staged install pattern -----------------------------------------------
 # These two helpers implement the "copy to staging, then atomically move
 # to live" pattern. The staging directory must be on the same filesystem

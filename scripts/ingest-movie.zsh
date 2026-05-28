@@ -356,10 +356,12 @@ for file in "${candidates[@]}"; do
     winner="$(compare_files "$file" "$dest")"
     if [[ "$winner" == "new" ]]; then
       log "new file wins; replacing existing"
+      log_compare_table "$dest" "$file"
       reject_file "$dest" "replaced" "replaced by higher-quality incoming file: ${file:t}"
       install_file "$file" "$dest"
     else
       log "existing file wins; rejecting incoming"
+      log_compare_table "$dest" "$file"
       reject_file "$file" "lower_quality" "lower or equal quality than existing: $dest"
     fi
   else
