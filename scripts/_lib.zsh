@@ -28,6 +28,25 @@ STABILITY_SLEEP_SECONDS=3
 # BSD `stat -f` (macOS) inside the helpers if the module isn't available.
 zmodload -F zsh/stat b:zstat 2>/dev/null || true
 
+# --- staging suffix --------------------------------------------------------
+# STAGING_SUFFIX is the trailing tag appended to the live library dir to
+# form each child's staging directory (e.g. MOVIES_DIR="/Volumes/nas/Movies"
+# combined with STAGING_SUFFIX="laptop" -> staging at
+# "/Volumes/nas/Movies laptop"). The per-host distinction matters when two
+# machines run the ingest concurrently against the same NAS — without it
+# they collide on a single shared staging dir.
+#
+# Resolution order:
+#   1. Whatever the user set in .env (allows meaningful tags like "laptop").
+#   2. Hostname-derived fallback: `hostname -s` lowercased with anything
+#      outside a-z0-9- stripped.
+#   3. Last-ditch literal "zzz" if hostname returns nothing usable
+#      (matches the historical default so the script still works).
+if [[ -z "${STAGING_SUFFIX:-}" ]]; then
+  STAGING_SUFFIX="$(hostname -s 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
+  STAGING_SUFFIX="${STAGING_SUFFIX:-zzz}"
+fi
+
 # --- file stat helpers -----------------------------------------------------
 
 # Get a file's size in bytes. Echoes "0" if the file is missing or
@@ -218,7 +237,8 @@ log_compare_table() {
 # to live" pattern. The staging directory must be on the same filesystem
 # as the live destination so the final mv is a true rename, not a slow
 # cp+rm. Children that use this pattern derive their staging dir as a
-# sibling of the live dir with a " zzz" suffix.
+# sibling of the live dir with a " <STAGING_SUFFIX>" suffix (set by the
+# block above — hostname-derived if not overridden in .env).
 #
 # The pattern protects against media servers that auto-watch the live
 # library — those tools never see a half-copied file because the file

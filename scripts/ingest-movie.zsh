@@ -23,7 +23,7 @@
 #   2. Stripped:    SOME_REL_PATH (extension dropped)
 #   3. Regex match against the stripped string. No match → parse_error.
 #   4. Template expansion (%NAME% replaced with captured values).
-#   5. Stage: cp source -> <MOVIES_DIR> zzz/<expanded>.m4v
+#   5. Stage: cp source -> <MOVIES_DIR> <STAGING_SUFFIX>/<expanded>.m4v
 #   6. Merge: atomic mv into <MOVIES_DIR>/<expanded>.m4v
 #   7. Remove source.
 #
@@ -116,7 +116,9 @@ fi
 INGEST_DIR="${INGEST_ROOT}/ingest-movie"
 REJECTED_DIR="${INGEST_ROOT}/ingest-movie_rejected"
 # Staging dir for the cp-then-mv install pattern. Sibling of MOVIES_DIR.
-COPY_DIR="${MOVIES_DIR%/} zzz"
+# STAGING_SUFFIX is set by _lib.zsh (hostname-derived) or in .env, so two
+# machines writing to the same NAS don't collide on a single staging dir.
+COPY_DIR="${MOVIES_DIR%/} ${STAGING_SUFFIX}"
 
 MIN_DURATION_SECONDS=120
 EMPTY_DIR_MIN_AGE_MIN=60

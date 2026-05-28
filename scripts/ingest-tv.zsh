@@ -23,7 +23,7 @@
 #   2. Stripped:    SOME_REL_PATH (extension dropped)
 #   3. Regex match against the stripped string. No match → parse_error.
 #   4. Template expansion (%NAME% replaced with captured values).
-#   5. Stage: cp source -> <TV_DIR> zzz/<expanded>.m4v
+#   5. Stage: cp source -> <TV_DIR> <STAGING_SUFFIX>/<expanded>.m4v
 #   6. Merge: atomic mv into <TV_DIR>/<expanded>.m4v
 #   7. Remove source.
 #
@@ -117,7 +117,9 @@ INGEST_DIR="${INGEST_ROOT}/ingest-tv"
 REJECTED_DIR="${INGEST_ROOT}/ingest-tv_rejected"
 # Staging dir for the cp-then-mv install pattern. Sibling of TV_DIR so
 # the final mv is a same-filesystem atomic rename, not a slow cp+rm.
-COPY_DIR="${TV_DIR%/} zzz"
+# STAGING_SUFFIX is set by _lib.zsh (hostname-derived) or in .env, so two
+# machines writing to the same NAS don't collide on a single staging dir.
+COPY_DIR="${TV_DIR%/} ${STAGING_SUFFIX}"
 
 MIN_DURATION_SECONDS=120
 EMPTY_DIR_MIN_AGE_MIN=60

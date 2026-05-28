@@ -21,7 +21,7 @@
 #   2. <rel> is matched against AUDIOBOOKS_PARSE_REGEX. No match -> parse_error.
 #   3. AUDIOBOOKS_NAME_TEMPLATE is expanded (%NAME% replaced with captures).
 #   4. Live destination: <AUDIOBOOKS_DIR>/<expanded>/
-#      Staging:          <AUDIOBOOKS_DIR> zzz/<expanded>/
+#      Staging:          <AUDIOBOOKS_DIR> <STAGING_SUFFIX>/<expanded>/
 #   5. Individual mp3 filenames within the book are preserved verbatim.
 #
 # Pipeline per book:
@@ -32,9 +32,11 @@
 #
 # Why staging? Some media servers scan the live library aggressively and auto-import anything they see there. Copying directly into the
 # live library risks it picking up half-copied files. Files are copied into
-# a sibling "<LIVE_DIR> zzz" directory (which the live-library watcher does not see); once on
-# disk, they are moved into LIVE_DIR via fast same-fs renames. The "zzz"
-# suffix sorts the staging dir to the bottom in file managers.
+# a sibling "<LIVE_DIR> <STAGING_SUFFIX>" directory (which the live-library
+# watcher does not see); once on disk, they are moved into LIVE_DIR via
+# fast same-fs renames. STAGING_SUFFIX defaults to the short hostname so
+# concurrent runs from multiple machines don't collide on a single staging
+# dir; it can be overridden in .env to something meaningful like "laptop".
 #
 # Per-mp3 conflict resolution (matched by filename):
 #   no LIVE counterpart                                  ->  install fresh
@@ -65,7 +67,7 @@
 #
 # Output:
 #   <AUDIOBOOKS_DIR>/<Author>/<Book>/...        (live library)
-#   <AUDIOBOOKS_DIR> zzz/<Author>/<Book>/...    (staging — sibling of LIVE_DIR)
+#   <AUDIOBOOKS_DIR> <STAGING_SUFFIX>/<Author>/<Book>/...   (staging — sibling of LIVE_DIR)
 #   <INGEST_ROOT>/ingest-audiobooks_rejected/<category>/<Author>/<Book>/*
 #
 # Usage:
@@ -158,9 +160,11 @@ INGEST_DIR="${INGEST_ROOT}/ingest-audiobooks"
 REJECTED_DIR="${INGEST_ROOT}/ingest-audiobooks_rejected"
 # Audiobook library is whatever AUDIOBOOKS_DIR points at (required).
 LIVE_DIR="$AUDIOBOOKS_DIR"
-# Staging dir is always a sibling of LIVE_DIR with a " zzz" suffix —
+# Staging dir is always a sibling of LIVE_DIR with a STAGING_SUFFIX —
 # same filesystem is required so the final mv into LIVE_DIR is atomic.
-COPY_DIR="${LIVE_DIR%/} zzz"
+# STAGING_SUFFIX is set by _lib.zsh (hostname-derived) or in .env, so two
+# machines writing to the same NAS don't collide on a single staging dir.
+COPY_DIR="${LIVE_DIR%/} ${STAGING_SUFFIX}"
 
 # Audio extensions other than .mp3 that disqualify a book (wrong_type).
 typeset -aU NON_MP3_AUDIO_EXTS=( m4a m4b mp4 flac wav ogg oga aac wma opus alac ape dsf dff aiff aif )

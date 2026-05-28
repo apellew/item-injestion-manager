@@ -78,7 +78,7 @@ All values are full absolute paths. No fallbacks, no derived defaults.
 | `TV_DIR` | `ingest-tv.zsh` | Where TV episodes land. |
 | `AUDIOBOOKS_DIR` | `ingest-audiobooks.zsh` | The live audiobooks library directory itself (NOT a parent). |
 
-Each script derives its own staging directory as a sibling of the live destination with a ` zzz` suffix (e.g. `MOVIES_DIR="/Volumes/nas/Movies"` implies a staging dir at `/Volumes/nas/Movies zzz`). The staging directory must be on the same filesystem as the live destination — see [Why staging?](#why-staging) for why.
+Each script derives its own staging directory as a sibling of the live destination with a ` <STAGING_SUFFIX>` suffix (e.g. `MOVIES_DIR="/Volumes/nas/Movies"` combined with `STAGING_SUFFIX="laptop"` gives a staging dir at `/Volumes/nas/Movies laptop`). `STAGING_SUFFIX` is optional — if unset, it defaults to the short hostname so concurrent runs from multiple machines never share a staging dir. The staging directory must be on the same filesystem as the live destination — see [Why staging?](#why-staging) for why.
 
 **Filename parsing (one pair per child):**
 
@@ -102,6 +102,20 @@ export AUDIOBOOKS_DIR="${LIBRARY_ROOT}/Audiobooks"
 ```
 
 Users with libraries on different volumes can leave `LIBRARY_ROOT` unset and write absolute paths directly. There's one side effect of setting it: the orchestrator uses it as an "is the NAS reachable?" probe and waits when the directory is unavailable. If `LIBRARY_ROOT` is unset, the probe is skipped and individual children fail if their library is unreachable.
+
+### Optional: `STAGING_SUFFIX`
+
+`STAGING_SUFFIX` is the trailing tag appended to each live library directory to form the per-script staging directory (separated by a single space). For example, `MOVIES_DIR="/Volumes/nas/Movies"` combined with `STAGING_SUFFIX="laptop"` gives a staging dir at `/Volumes/nas/Movies laptop`.
+
+It's optional — if unset, the scripts derive a default from `hostname -s` (lowercased, anything outside `[a-z0-9-]` stripped). This means multi-machine setups work without any config; each machine gets its own staging tree on the shared NAS, and they don't step on each other mid-copy.
+
+Set it explicitly in `.env` if you prefer a meaningful name like `laptop` / `desktop` / a UUID fragment, e.g.:
+
+```zsh
+export STAGING_SUFFIX="laptop"
+```
+
+If two machines pick the same `STAGING_SUFFIX`, they're back to colliding on a single staging dir — that's now a configuration mistake rather than a script limitation.
 
 ## Filename parsing (regex + template)
 
@@ -149,7 +163,7 @@ Just set the relevant `*_PARSE_REGEX` and `*_NAME_TEMPLATE` in your `.env` to wh
 
 Every install — TV, Movie, audiobook — goes through a sibling staging directory before landing in the live library:
 
-1. **Stage:** `cp` source → `<DEST_DIR> zzz/<expanded path>` on the same filesystem as the live destination.
+1. **Stage:** `cp` source → `<DEST_DIR> <STAGING_SUFFIX>/<expanded path>` on the same filesystem as the live destination.
 2. **Merge:** atomic `mv` of the staged file (or staged book directory tree) → live destination.
 3. **Cleanup:** remove the source file.
 
@@ -158,7 +172,7 @@ Two reasons this matters:
 - Some media servers scan the live library aggressively and auto-import anything they see there. Copying directly into the live library risks the server picking up a half-copied file. The staged file only appears in the live library as a complete unit, because the final `mv` is an atomic same-filesystem rename.
 - Cross-filesystem copies (which include the typical local-disk → NAS-mount case) are slow and interruptible — `mv src dst` across filesystems silently becomes `cp` + `rm`, with all the partial-state risk that implies. Splitting it into an explicit `cp` to staging followed by an atomic same-filesystem `mv` makes the failure modes legible.
 
-The staging directory is always a **sibling** of the live destination with a ` zzz` suffix (so it sorts to the bottom in file managers and visibly signals "not part of the live library"). It's not separately configurable — the same-filesystem requirement is what makes the final `mv` atomic, and a sibling is the simplest place that guarantees that.
+The staging directory is always a **sibling** of the live destination, with the suffix controlled by `STAGING_SUFFIX` (defaults to the short hostname when unset). The sibling-of-live placement is not separately configurable — the same-filesystem requirement is what makes the final `mv` atomic, and a sibling is the simplest place that guarantees that. The per-host suffix specifically exists so two machines ingesting against the same NAS don't share a single staging tree and step on each other mid-copy.
 
 If a `cp` to staging fails partway through, the staged path is left in place and the source is untouched; the next run re-uses the partial-staged file if its size matches the source, or recopies if not. The live library is never touched by a failed install.
 
@@ -182,11 +196,11 @@ Library destinations are each configured independently — they can live on the 
 
 ```
 $MOVIES_DIR         → /Volumes/nas/media/Movies
-                      (staging at /Volumes/nas/media/Movies zzz)
+                      (staging at /Volumes/nas/media/Movies <STAGING_SUFFIX>)
 $TV_DIR             → /Volumes/nas/media/TV
-                      (staging at /Volumes/nas/media/TV zzz)
+                      (staging at /Volumes/nas/media/TV <STAGING_SUFFIX>)
 $AUDIOBOOKS_DIR     → /Volumes/nas/media/Audiobooks
-                      (staging at /Volumes/nas/media/Audiobooks zzz)
+                      (staging at /Volumes/nas/media/Audiobooks <STAGING_SUFFIX>)
 ```
 
 …while a split-volume layout might look like:
@@ -195,7 +209,7 @@ $AUDIOBOOKS_DIR     → /Volumes/nas/media/Audiobooks
 $MOVIES_DIR         → /Volumes/media/Movies
 $TV_DIR             → /Volumes/media/TV
 $AUDIOBOOKS_DIR     → /Volumes/media-other/Audiobooks
-                      (staging at /Volumes/media-other/Audiobooks zzz)
+                      (staging at /Volumes/media-other/Audiobooks <STAGING_SUFFIX>)
 ```
 
 Each staging dir is always a sibling of its live counterpart, on the same filesystem — see [Why staging?](#why-staging).
