@@ -240,7 +240,7 @@ Drop an `ingest-<type>.zsh` next to the orchestrator and `chmod +x` it. The orch
 
 ## TV child
 
-Expects `.m4v` files in `$INGEST_ROOT/ingest-tv/` (recursive).
+Expects `.m4v` files in `$INGEST_ROOT/ingest-tv/`. Nested directory trees are flattened before processing: every file in a subdirectory is moved up to the ingest root, and the now-empty subdirs are removed. Files mid-copy are deferred to the next run; basename collisions are rejected as `name_collision`. This lets you drag a downloaded show folder into ingest-tv and have the script sort the files out automatically.
 
 | Validation | Action on failure |
 |---|---|
@@ -257,7 +257,7 @@ Conflict resolution: higher video height wins; file size is the tiebreak.
 
 ## Movie child
 
-Expects `.m4v` files in `$INGEST_ROOT/ingest-movie/` (recursive).
+Expects `.m4v` files in `$INGEST_ROOT/ingest-movie/`. As with the TV child, nested directory trees are flattened to the ingest root before processing (files mid-copy are deferred to the next run; basename collisions are rejected as `name_collision`).
 
 | Validation | Action on failure |
 |---|---|
@@ -323,6 +323,8 @@ If at least one mp3 is installed for a book (winner or new), the script always i
 | `parse_error` | Regex didn't match the source filename, missing required files, bad author name |
 | `lower_quality` | Lost a quality comparison vs an existing library file |
 | `replaced` | An existing library file was bumped out by a higher-quality incoming file |
+| `ambiguous_existing` | TV only — existing library files cover the same `SxxEyy` in a way that's unsafe to auto-resolve (multi-part, range, variant, or exact+extras) |
+| `name_collision` | TV/Movie only — a flattened file's basename clashes with another file already at the ingest root |
 
 Each rejection writes a sibling `.log` file next to the rejected media, with the timestamp, category, original path, and reason.
 

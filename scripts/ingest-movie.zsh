@@ -244,6 +244,12 @@ install_file() {
 
 # --- main processing --------------------------------------------------------
 
+# Pre-pass: flatten any nested directory tree the user has dropped into
+# the ingest dir up to its root. After this step every file is either
+# directly under $INGEST_DIR or has been moved out via reject_file
+# (name_collision) / skip (in use).
+flatten_ingest "$INGEST_DIR"
+
 # First pass: handle non-m4v files.
 typeset -a strays
 strays=( "$INGEST_DIR"/**/*(.N) )

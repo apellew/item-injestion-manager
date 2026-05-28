@@ -321,3 +321,80 @@ merge_file() {
   mv -- "$staged" "$live"
   return 0
 }
+
+# --- ingest-dir flatten ----------------------------------------------------
+# Move every file in a subdirectory of the given ingest dir up to its
+# root, then rmdir the now-empty subdirs (and any empty ancestors). Used
+# by the TV and Movie children before they start processing, so users
+# can drop a nested folder tree into the ingest dir and have it sorted
+# out automatically. Audiobooks deliberately do NOT call this — books
+# are directories and their structure must be preserved.
+#
+# Behaviour:
+#   - Files mid-copy (per is_file_in_use) are skipped and left where
+#     they are; the next run picks them up.
+#   - Files whose basename collides with a file already at the ingest
+#     root are routed to rejected/name_collision/ via the caller's
+#     reject_file (first writer wins).
+#   - Hidden files (e.g. .DS_Store) are not walked into; they stay
+#     where they are. Consistent with the rest of the script's globs.
+#
+# Only directories that we actually moved a file out of are considered
+# for removal — directories the user created intentionally but hadn't
+# yet populated are left alone, even if they happen to be empty.
+#
+# Assumes the caller has defined log(), debug(), skip(), reject_file(),
+# and DEBUG. EXTENDED_GLOB and NULL_GLOB are assumed to be set (they
+# are, per each child's setopt line).
+flatten_ingest() {
+  local dir="$1"
+  local -a nested
+  nested=( "$dir"/*/**/*(.N) )
+
+  if (( ${#nested[@]} == 0 )); then
+    return 0
+  fi
+  log "flattening: ${#nested[@]} file(s) found in subdirectories of $dir"
+
+  local f target
+  local -aU emptied_dirs   # -U = unique; collects parents to clean up
+  for f in "${nested[@]}"; do
+    target="${dir}/${f:t}"
+    if is_file_in_use "$f"; then
+      skip "(in use, deferred flatten): $f ($IN_USE_REASON)"
+      continue
+    fi
+    if [[ -e "$target" ]]; then
+      reject_file "$f" "name_collision" \
+        "flatten target already exists at ingest root: $target"
+      emptied_dirs+=( "${f:h}" )
+      continue
+    fi
+    log "FLATTEN: $f -> $target"
+    if (( DEBUG )); then
+      print -- "[DEBUG] would mv: $f -> $target"
+    else
+      if mv -- "$f" "$target"; then
+        emptied_dirs+=( "${f:h}" )
+      else
+        log "ERROR: flatten failed: $f -> $target"
+      fi
+    fi
+  done
+
+  if (( DEBUG )); then
+    return 0
+  fi
+
+  # Remove the dirs we just emptied (and any empty ancestors, up to but
+  # not including $dir itself). rmdir refuses non-empty dirs, so this
+  # is safe even if a sibling file is still present.
+  local d
+  for d in "${emptied_dirs[@]}"; do
+    while [[ "$d" != "$dir" && "$d" == "$dir/"* && -d "$d" ]]; do
+      rmdir -- "$d" 2>/dev/null || break
+      log "removed empty dir: $d"
+      d="${d:h}"
+    done
+  done
+}
