@@ -352,20 +352,47 @@ for file in "${candidates[@]}"; do
   local dest="${TV_DIR}/${dest_rel}.m4v"
   debug "proposed destination: $dest"
 
-  # --- conflict resolution --------------------------------------------------
+  # --- detect existing episode --------------------------------------------
+  # Match the proposed dest exactly first, then fuzzy-match against
+  # "<stem> - *.m4v" to catch episodes already in the library that
+  # include an episode title (e.g. "Show (Year) - S01E01 - Pilot.m4v"
+  # duplicating "Show (Year) - S01E01.m4v"). Without this fuzzy check,
+  # the exact-path comparison misses titled files and the script
+  # happily produces a second copy of the same episode in the library.
+  local existing=""
   if [[ -e "$dest" ]]; then
-    log "conflict: destination already exists: $dest"
+    existing="$dest"
+  else
+    local season_dir="${dest:h}"
+    local stem_base="${dest:t:r}"
+    local -a fuzzy
+    fuzzy=( "${season_dir}/${stem_base} - "*.m4v(.N) )
+    if (( ${#fuzzy[@]} == 1 )); then
+      existing="${fuzzy[1]}"
+      log "fuzzy-matched existing titled episode: $existing"
+    elif (( ${#fuzzy[@]} > 1 )); then
+      log "AMBIGUOUS: multiple existing files match SxxEyy in ${season_dir}:"
+      for f in "${fuzzy[@]}"; do log "  - ${f:t}"; done
+      reject_file "$file" "ambiguous_existing" \
+        "multiple existing files share SxxEyy (${#fuzzy[@]} found in ${season_dir}); resolve manually then retry"
+      continue
+    fi
+  fi
+
+  # --- conflict resolution --------------------------------------------------
+  if [[ -n "$existing" ]]; then
+    log "conflict: destination already exists: $existing"
     local winner
-    winner="$(compare_files "$file" "$dest")"
+    winner="$(compare_files "$file" "$existing")"
     if [[ "$winner" == "new" ]]; then
       log "new file wins; replacing existing"
-      log_compare_table "$dest" "$file"
-      reject_file "$dest" "replaced" "replaced by higher-quality incoming file: ${file:t}"
+      log_compare_table "$existing" "$file"
+      reject_file "$existing" "replaced" "replaced by higher-quality incoming file: ${file:t}"
       install_file "$file" "$dest"
     else
       log "existing file wins; rejecting incoming"
-      log_compare_table "$dest" "$file"
-      reject_file "$file" "lower_quality" "lower or equal quality than existing: $dest"
+      log_compare_table "$existing" "$file"
+      reject_file "$file" "lower_quality" "lower or equal quality than existing: $existing"
     fi
   else
     install_file "$file" "$dest"
