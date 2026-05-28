@@ -353,30 +353,58 @@ for file in "${candidates[@]}"; do
   debug "proposed destination: $dest"
 
   # --- detect existing episode --------------------------------------------
-  # Match the proposed dest exactly first, then fuzzy-match against
-  # "<stem> - *.m4v" to catch episodes already in the library that
-  # include an episode title (e.g. "Show (Year) - S01E01 - Pilot.m4v"
-  # duplicating "Show (Year) - S01E01.m4v"). Without this fuzzy check,
-  # the exact-path comparison misses titled files and the script
-  # happily produces a second copy of the same episode in the library.
+  # Beyond the exact-path check, scan the season dir with two glob shapes:
+  #   titled : "<stem> - *.m4v"  — "S01E01 - Pilot.m4v", multi-part pilots
+  #                                 ("...-Pilot-part1.m4v", "...-part2.m4v")
+  #   variant: "<stem>-*.m4v"    — episode ranges ("S01E01-04 - ...m4v",
+  #                                 "S01E01-E04 - ..."), variant suffixes
+  #                                 ("S01E01-extended.m4v", "-theatrical")
+  #
+  # The two patterns are mutually exclusive (space-dash-space vs bare dash),
+  # so file sets don't overlap.
+  #
+  # Outcomes:
+  #   - exact match only         → conflict resolution against $dest
+  #                                (the original single-file case).
+  #   - 1 titled, 0 variant      → conflict resolution against the titled
+  #                                file (issue #24's case).
+  #   - any other non-zero combo → ambiguous_existing rejection: the user
+  #                                must sort the library by hand before
+  #                                this episode can land. See issue #25.
+  local season_dir="${dest:h}"
+  local stem_base="${dest:t:r}"
+  local exact_exists=0
+  [[ -e "$dest" ]] && exact_exists=1
+
+  local -a titled variant
+  titled=( "${season_dir}/${stem_base} - "*.m4v(.N) )
+  variant=( "${season_dir}/${stem_base}-"*.m4v(.N) )
+
   local existing=""
-  if [[ -e "$dest" ]]; then
-    existing="$dest"
-  else
-    local season_dir="${dest:h}"
-    local stem_base="${dest:t:r}"
-    local -a fuzzy
-    fuzzy=( "${season_dir}/${stem_base} - "*.m4v(.N) )
-    if (( ${#fuzzy[@]} == 1 )); then
-      existing="${fuzzy[1]}"
-      log "fuzzy-matched existing titled episode: $existing"
-    elif (( ${#fuzzy[@]} > 1 )); then
-      log "AMBIGUOUS: multiple existing files match SxxEyy in ${season_dir}:"
-      for f in "${fuzzy[@]}"; do log "  - ${f:t}"; done
-      reject_file "$file" "ambiguous_existing" \
-        "multiple existing files share SxxEyy (${#fuzzy[@]} found in ${season_dir}); resolve manually then retry"
-      continue
+  local ambiguous=0
+  if (( exact_exists )); then
+    if (( ${#titled[@]} == 0 && ${#variant[@]} == 0 )); then
+      existing="$dest"
+    else
+      ambiguous=1
     fi
+  else
+    if (( ${#titled[@]} == 1 && ${#variant[@]} == 0 )); then
+      existing="${titled[1]}"
+      log "fuzzy-matched existing titled episode: $existing"
+    elif (( ${#titled[@]} + ${#variant[@]} >= 1 )); then
+      ambiguous=1
+    fi
+  fi
+
+  if (( ambiguous )); then
+    log "AMBIGUOUS: existing file(s) in ${season_dir} cover SxxEyy in a way that's unsafe to auto-resolve:"
+    (( exact_exists )) && log "  - ${dest:t} (exact)"
+    for f in "${titled[@]}"; do log "  - ${f:t} (titled / multi-part)"; done
+    for f in "${variant[@]}"; do log "  - ${f:t} (range / variant)"; done
+    reject_file "$file" "ambiguous_existing" \
+      "existing files in ${season_dir} cover SxxEyy ambiguously (multi-part / range / variant / exact+extras); resolve manually then retry"
+    continue
   fi
 
   # --- conflict resolution --------------------------------------------------
